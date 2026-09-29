@@ -1,0 +1,7 @@
+{
+    "name": "示例主题",
+    "css": [
+        "theme.css"
+    ],
+    "fonts": []
+}

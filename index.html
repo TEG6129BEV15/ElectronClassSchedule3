@@ -9,6 +9,7 @@
   <script type="text/javascript" src="js/jquery.min.js"></script>
   <script type="text/javascript" src="js/index.js"></script>
   <link rel="stylesheet" type="text/css" href="css/style.css">
+  <script type="text/javascript" src="js/themePack.js"></script>
 </head>
 
 <body>
@@ -144,7 +145,9 @@
     // 右侧竖排模式下行已变为列，没有“下方组件”的概念：
     // 高亮课程/课间始终展开为“全称 + 内联倒计时”，变色规则不变
     const isRightLayout = document.documentElement.dataset.position === 'right';
-    const showInlineCountdown = (isRightLayout || hasComponentBelowSchedule()) && isClassCountdown;
+    // “课上计时”只控制上课中的倒计时；课间倒计时始终显示
+    const showInlineCountdown = (isRightLayout || hasComponentBelowSchedule())
+      && (isClassCountdown || scheduleData.currentHighlight.isBreak);
     if (scheduleData.currentHighlight.isNextDay) {
       classHtml += '<div class="class breakClassExpanded stateTransition">明天</div>';
     }
@@ -232,14 +235,106 @@
     return false;
   }
 
+  // ===== 悬浮倒计时框显隐（0px 展开 / 收起动画） =====
+  // 状态机：null=首帧（直接落地不播动画）/ true=显示 / false=隐藏。
+  // 收起动画播放期间节点 display 仍为 block，由 countdownHiding 标记，
+  // 防止 tick 每拍“校正 display”把动画半途掐掉。
+  let countdownPopupState = null
+  const countdownHiding = new WeakSet()
+  // 每个悬浮窗正在播放显隐动画时的 rAF 句柄（快速来回切换时取消旧循环）
+  const popupAnimFrames = new WeakMap()
+
+  // 悬浮窗 0px 展开/收起期间，窗口高度必须随动画逐帧生长/收缩；
+  // 仅靠每秒一次的 tick 上报会让窗口在整段动画结束后才 resize，
+  // 弹出框被裁在视口外，用户看不到展开动画（“课上计时”关闭→打开即如此）。
+  function pumpWindowBoundsWhileAnimating(el, anim) {
+    cancelAnimationFrame(popupAnimFrames.get(el) || 0)
+    const pump = () => {
+      if (anim.playState !== 'running') {
+        popupAnimFrames.delete(el)
+        // 终态（display 已在 onfinish 落地）再校正一次窗口尺寸
+        reportWindowBounds()
+        return
+      }
+      reportWindowBounds()
+      popupAnimFrames.set(el, requestAnimationFrame(pump))
+    }
+    popupAnimFrames.set(el, requestAnimationFrame(pump))
+  }
+
+  function animateCountdownContainer(el, show) {
+    if (show) {
+      el.style.display = 'block'
+      const height = el.offsetHeight || el.scrollHeight
+      if (height > 0) {
+        const anim = el.animate([
+          { height: '0px', opacity: 0, overflow: 'hidden' },
+          { height: height + 'px', opacity: 1, overflow: 'hidden' }
+        ], { duration: 300, easing: 'cubic-bezier(.22,.9,.26,1.08)' })
+        pumpWindowBoundsWhileAnimating(el, anim)
+      }
+    } else {
+      if (el.style.display === 'none' || countdownHiding.has(el)) return
+      const height = el.offsetHeight
+      if (height <= 0) { el.style.display = 'none'; return }
+      countdownHiding.add(el)
+      const anim = el.animate([
+        { height: height + 'px', opacity: 1, overflow: 'hidden' },
+        { height: '0px', opacity: 0, overflow: 'hidden' }
+      ], { duration: 220, easing: 'ease-in' })
+      pumpWindowBoundsWhileAnimating(el, anim)
+      anim.onfinish = () => {
+        countdownHiding.delete(el)
+        // 播完才真正 display:none；期间若已切回显示则保留
+        if (countdownPopupState === false) el.style.display = 'none'
+      }
+    }
+  }
+
+  function setCountdownPopupDisplay(visible) {
+    const containers = document.querySelectorAll('.scheduleComponent .countdownContainer')
+    if (countdownPopupState === null) {
+      countdownPopupState = visible
+      containers.forEach((el) => { el.style.display = visible ? 'block' : 'none' })
+      return
+    }
+    if (visible !== countdownPopupState) {
+      countdownPopupState = visible
+      containers.forEach((el) => animateCountdownContainer(el, visible))
+      return
+    }
+    // 状态不变：仅校正 display（布局重建后新节点需要同步；收起动画中的节点跳过）
+    containers.forEach((el) => {
+      if (visible) el.style.display = 'block'
+      else if (!countdownHiding.has(el)) el.style.display = 'none'
+    })
+  }
+
+  // 位置切换期间调用：取消悬浮倒计时框正在播放的 0px 展开/收起动画，
+  // 并让下一次 tick 按新布局直接落到终态 display（状态机置 null = 首帧不播动画）。
+  // 否则尺寸测量会取到动画中间高度（如回程时窗口高度先变 87、再跳 574/230）。
+  // 调用时 body.position-switching 遮罩仍在，用户看不到这次瞬变。
+  function finalizeCountdownPopupImmediately() {
+    document.querySelectorAll('.scheduleComponent .countdownContainer').forEach((el) => {
+      el.getAnimations().forEach((anim) => anim.cancel())
+      countdownHiding.delete(el)
+    })
+    countdownPopupState = null
+    tick(true)
+  }
+
   function setCountdownerContent() {
     if (!currentFullName || !countdownText || !countdownContainer || !miniCountdown) return;
     if (scheduleData.currentHighlight.isNextDay) {
-      countdownContainer.style.display = 'none';
       miniCountdown.style.display = 'none';
-      document.querySelectorAll('.scheduleComponent .countdownContainer').forEach((element) => {
-        element.style.display = 'none';
-      });
+      setCountdownPopupDisplay(false);
+      return;
+    }
+    // 当前时间不在任何时间段内（上学前/放学后/时间表空档）：
+    // 没有计时目标，小三角形与下方悬浮倒计时框一起隐藏
+    if (!scheduleData.currentHighlight.type) {
+      miniCountdown.style.display = 'none';
+      setCountdownPopupDisplay(false);
       return;
     }
     currentFullName.innerText = scheduleData.currentHighlight.fullName;
@@ -248,38 +343,37 @@
     countdownText.innerText = scheduleData.currentHighlight.countdownText;
     if (inlineCountdown) {
       inlineCountdown.innerText = scheduleData.currentHighlight.countdownText;
-      inlineCountdown.style.display = isClassCountdown ? 'inline' : 'none';
+      // 课间倒计时不受“课上计时”开关影响
+      inlineCountdown.style.display = (isClassCountdown || scheduleData.currentHighlight.isBreak) ? 'inline' : 'none';
     }
     const isRightLayout = document.documentElement.dataset.position === 'right';
+    let popupVisible = true;
     if (scheduleData.currentHighlight.type === 'current') {
       if (isClassCountdown) {
         if (isClassHidden) { // 上课隐藏 -> 显示顶部小窗口（与布局模式无关）
-          countdownContainer.style.display = 'none'
+          popupVisible = false;
           miniCountdown.style.display = 'block'
           miniCountdown.innerHTML = `<div class="currentClass">${currentFullName.innerText = scheduleData.currentHighlight.fullName}</div><div class="countdown" style="margin-left:5px">${scheduleData.currentHighlight.countdownText}</div>`
         } else if (isRightLayout || hasComponentBelowSchedule()) {
           // 倒计时已内联在高亮格子中（right 模式始终内联），不重复显示倒计时框
-          countdownContainer.style.display = 'none';
+          popupVisible = false;
           miniCountdown.style.display = 'none';
         } else {
-          countdownContainer.style.display = 'block';
+          popupVisible = true;
           miniCountdown.style.display = 'none';
         }
       } else { // 上课 并且关闭了倒计时 -> 都不显示
-        countdownContainer.style.display = 'none'
+        popupVisible = false;
         miniCountdown.style.display = 'none'
       }
     }
     else if (scheduleData.currentHighlight.isBreak) {
-      if (isClassCountdown && !isRightLayout && !hasComponentBelowSchedule()) {
-        countdownContainer.style.display = 'block';
-      } else {
-        countdownContainer.style.display = 'none';
-      }
+      // 课间倒计时窗口始终显示，与“课上计时”开关无关
+      popupVisible = !isRightLayout && !hasComponentBelowSchedule();
       miniCountdown.style.display = 'none';
     }
-    else { // 下课/下一节课预告：倒计时框正常显示（right 模式下定位在课程列底部）
-      countdownContainer.style.display = 'block';
+    else { // 下一节课预告：倒计时框正常显示（right 模式下定位在课程列底部）
+      popupVisible = true;
       miniCountdown.style.display = 'none'
     }
     document.querySelectorAll('.scheduleComponent .countdowner').forEach((element) => {
@@ -291,9 +385,7 @@
       }
       if (countdown) countdown.innerText = scheduleData.currentHighlight.countdownText;
     });
-    document.querySelectorAll('.scheduleComponent .countdownContainer').forEach((element) => {
-      element.style.display = countdownContainer.style.display;
-    });
+    setCountdownPopupDisplay(popupVisible);
   }
 
   function setCountdownerPosition() {
@@ -550,63 +642,76 @@
     return false
   }
 
-  function reportWindowBounds() {
-    if (!componentRows) return
-    if (positionSwitchAnimating) return
-    const mode = settings?.window_position || 'top';
-    // 列宽刚统一时布局尚未稳定，跳过本次 IPC；rAF 兜底下一帧补报
-    //（列宽变化会触发 RO，但单列等场景尺寸可能恰好不变，RO 不保证触发）
-    if (mode === 'right' && syncRightColumnWidth()) {
-      requestAnimationFrame(() => reportWindowBounds())
-      return
-    }
-    const rowsRect = componentRows.getBoundingClientRect()
-    let bottom = rowsRect.bottom
-    let left = rowsRect.left
-    document.querySelectorAll('.countdownContainer').forEach((el) => {
-      const rect = el.getBoundingClientRect()
-      if (rect.height > 0) {
-        if (rect.bottom > bottom) bottom = rect.bottom
-        if (rect.left < left) left = rect.left
-      }
-    })
+  // 终态内容尺寸测量（与上报口径一致）。
+  // right 模式下列宽刚被 syncRightColumnWidth 改写时返回 restylePending，
+  // 调用方需等一帧再测；返回的尺寸与视口位置无关（内容包围盒 + 边距），
+  // 因此在“新布局 + 旧窗口”的过渡帧里测量也是准确的。
+  function measureContentSize(mode) {
+    if (!componentRows) return null;
+    const rowsRect = componentRows.getBoundingClientRect();
     const miniRect = (miniCountdown && getComputedStyle(miniCountdown).display !== 'none')
-      ? miniCountdown.getBoundingClientRect() : null
-    if (miniRect) {
-      if (miniRect.bottom > bottom) bottom = miniRect.bottom
-      if (miniRect.left < left) left = miniRect.left
-    }
-    const height = Math.ceil(bottom + 2)
+      ? miniCountdown.getBoundingClientRect() : null;
     if (mode === 'right') {
-      // right 模式内容垂直居中，bottom/left 随当前视口变化，直接用视口坐标上报会
-      // 形成“窗口变大→居中后 bottom 更大→再上报更大”的正反馈爬升。
-      // 改为测量与视口无关的内容包围盒（相对 componentRows 原点归一化）+ 四边边距。
-      const edgeMargin = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--top-space')) || 4
-      let contentW = rowsRect.width
-      let contentH = rowsRect.height
+      if (syncRightColumnWidth()) return { restylePending: true };
+      const edgeMargin = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--top-space')) || 4;
+      let contentW = rowsRect.width;
+      let contentH = rowsRect.height;
       document.querySelectorAll('.countdownContainer').forEach((el) => {
-        const rect = el.getBoundingClientRect()
-        if (rect.height <= 0) return
-        const relBottom = rect.bottom - rowsRect.top
-        const relRight = rect.right - rowsRect.left
-        if (relBottom > contentH) contentH = relBottom
-        if (relRight > contentW) contentW = relRight
-      })
-      // miniCountdown 是 fixed 居中元素，与内容流无关；显示时其自身尺寸作为下限即可
+        const rect = el.getBoundingClientRect();
+        if (rect.height <= 0) return;
+        const relBottom = rect.bottom - rowsRect.top;
+        if (relBottom > contentH) contentH = relBottom;
+        // 正在播放 0px 收起动画的悬浮窗：高度随动画逐帧收缩（计入 contentH，
+        // 窗口才能跟着收起），但终态是隐藏，残宽不能计入，否则动画结束时
+        // 窗口宽度会再跳一次
+        if (!countdownHiding.has(el)) {
+          const relRight = rect.right - rowsRect.left;
+          if (relRight > contentW) contentW = relRight;
+        }
+      });
+      // miniCountdown 是 fixed 居中元素，与内容流无关；显示时其自身尺寸作为下限
       if (miniRect) {
-        if (miniRect.height > contentH) contentH = miniRect.height
-        if (miniRect.width > contentW) contentW = miniRect.width
+        if (miniRect.height > contentH) contentH = miniRect.height;
+        if (miniRect.width > contentW) contentW = miniRect.width;
       }
-      const height = Math.ceil(contentH + edgeMargin * 2)
-      const width = Math.ceil(contentW + edgeMargin * 2)
-      if (height > 20 && width > 40
-        && (height !== lastReportedBounds.height || width !== lastReportedBounds.width)) {
-        lastReportedBounds = { width, height }
-        ipcRenderer.send('main-window-height', { width, height })
+      return {
+        width: Math.ceil(contentW + edgeMargin * 2),
+        height: Math.ceil(contentH + edgeMargin * 2),
+        restylePending: false
+      };
+    }
+    let bottom = rowsRect.bottom;
+    document.querySelectorAll('.countdownContainer').forEach((el) => {
+      // 收起动画播放期间也要按实时高度计入：窗口随动画逐帧收缩，
+      // 否则第一帧就缩到终态高度，悬浮窗被裁出视口、用户看不到收起动画
+      const rect = el.getBoundingClientRect();
+      if (rect.height > 0 && rect.bottom > bottom) bottom = rect.bottom;
+    });
+    if (miniRect && miniRect.bottom > bottom) bottom = miniRect.bottom;
+    return { height: Math.ceil(bottom + 2), restylePending: false };
+  }
+
+  function reportWindowBounds() {
+    if (!componentRows) return;
+    if (positionSwitchAnimating) return;
+    const mode = settings?.window_position || 'top';
+    const size = measureContentSize(mode);
+    if (!size) return;
+    // 列宽刚统一时布局尚未稳定，下一帧补测
+    //（列宽变化会触发 RO，但单列等场景尺寸可能恰好不变，RO 不保证触发）
+    if (size.restylePending) {
+      requestAnimationFrame(() => reportWindowBounds());
+      return;
+    }
+    if (mode === 'right') {
+      if (size.height > 20 && size.width > 40
+        && (size.height !== lastReportedBounds.height || size.width !== lastReportedBounds.width)) {
+        lastReportedBounds = { width: size.width, height: size.height };
+        ipcRenderer.send('main-window-height', { width: size.width, height: size.height });
       }
-    } else if (height > 20 && height !== lastReportedBounds.height) {
-      lastReportedBounds = { width: 0, height }
-      ipcRenderer.send('main-window-height', height)
+    } else if (size.height > 20 && size.height !== lastReportedBounds.height) {
+      lastReportedBounds = { width: 0, height: size.height };
+      ipcRenderer.send('main-window-height', size.height);
     }
   }
   new ResizeObserver(() => reportWindowBounds()).observe(componentRows)
@@ -709,44 +814,153 @@
     applyTheme()
   })
 
-  // 位置模式切换动画：逐行交错淡入 + 轻微上浮，配合窗口 resize 形成整体“流动”感。
-  // 动画只播一次，避免与淡化 opacity 过渡冲突；目标为 .componentRow（不影响 .globalContainer 的定位 transform）。
-  // 动画期间 transform 逐帧变化会污染布局测量（宽度震荡），此时挂起尺寸上报，结束后补报终态。
+  // ===== 位置模式切换动画（先 resize 到终态，再 FLIP） =====
+  // 难点：top→right 时窗口矩形本身要从“全宽窄条”变为“贴右竖窗”。
+  // 若在旧窗口里直接播放位移动画，竖排内容在 145px 高的旧视口中大面积出界，
+  // 动画结束后窗口再收缩又会整体跳一次。因此流程是：
+  //   拍旧位置(屏幕坐标) → 切布局 → 测终态尺寸 → 主进程 setBounds 到终态
+  //   → 拍新位置(屏幕坐标) → FLIP 各组件/格子独立滑入
+  // 切换中间态用 body.position-switching 遮罩，避免“新布局+旧窗口”的出界帧。
+  // 动画期间暂停尺寸上报（translate 逐帧污染包围盒测量），结束后补报。
   let positionSwitchAnimating = false
-  function animatePositionSwitch() {
-    if (!componentRows) return;
-    const rows = componentRows.querySelectorAll('.componentRow');
-    const total = 380 + (rows.length - 1) * 65;
-    positionSwitchAnimating = true;
-    rows.forEach((row, i) => {
-      row.animate(
-        [
-          { opacity: 0, transform: 'translateY(10px) scale(.97)' },
-          { opacity: 1, transform: 'translateY(0) scale(1)' }
-        ],
-        {
-          duration: 380,
-          delay: i * 65,
-          easing: 'cubic-bezier(.22,.9,.26,1.08)',
-          fill: 'backwards'
-        }
-      );
-    });
-    // 同时覆盖课表高亮格子的 0.45s 入场动画（enterCurrentClass/enterBreakClass）
-    setTimeout(() => { positionSwitchAnimating = false; reportWindowBounds() }, Math.max(total, 450) + 80);
+  const nextAnimationFrame = () => new Promise((resolve) => requestAnimationFrame(() => resolve()))
+
+  function screenRectOf(el) {
+    const r = el.getBoundingClientRect()
+    return {
+      left: r.left + window.screenX,
+      top: r.top + window.screenY,
+      width: r.width,
+      height: r.height
+    }
   }
 
-  ipcRenderer.on('position-mode-changed', (e, mode) => {
+  function capturePositionSnapshot() {
+    const components = new Map()
+    document.querySelectorAll('#componentRows [data-component-slot]').forEach((el) => {
+      components.set(el, screenRectOf(el))
+    })
+    const cells = []
+    document.querySelectorAll('.scheduleComponent .classContainer').forEach((container) => {
+      cells.push(Array.from(container.children).map((child) => screenRectOf(child)))
+    })
+    return { components, cells }
+  }
+
+  function playPositionFlip(before) {
+    if (!before || !componentRows) return
+    // 关键：父组件与子格子必须使用完全相同的 duration/easing/delay。
+    // 屏幕轨迹 = 父位移 e(t) + 子相对位移 e(t)，只有两者的时间函数相同，
+    // 叠加结果才是“旧屏幕位置 → 新屏幕位置”的直线运动。
+    // “各组件独立”由各自独立的 Animation 对象承担，而非错开启动时刻。
+    const DURATION = 420
+    const EASING = 'cubic-bezier(.22,.9,.26,1.08)'
+    const run = (el, keyframes) => {
+      const anim = el.animate(keyframes, { duration: DURATION, easing: EASING, fill: 'both' })
+      anim.onfinish = () => anim.cancel()
+    }
+
+    // ===== 第一趟：在创建任何动画之前，先测完全部“to”位置 =====
+    // fill:'both' 的动画一创建，首帧偏移立即作用于视觉，此后子元素的
+    // getBoundingClientRect 会连带包含父动画偏移，测出的位移会翻倍，
+    // 因此测量与动画创建必须分成两趟。
+    const componentMoves = []
+    const componentDelta = new Map()
+    before.components.forEach((from, el) => {
+      if (!el.isConnected) return
+      const to = screenRectOf(el)
+      const dx = from.left - to.left
+      const dy = from.top - to.top
+      componentDelta.set(el, { dx, dy })
+      if (Math.abs(dx) >= 1 || Math.abs(dy) >= 1) {
+        componentMoves.push({ el, dx, dy })
+      }
+    })
+    const cellMoves = []
+    const containers = document.querySelectorAll('.scheduleComponent .classContainer')
+    before.cells.forEach((beforeList, containerIndex) => {
+      const container = containers[containerIndex]
+      if (!container) return
+      const parentSlot = container.closest('[data-component-slot]')
+      const parentDelta = (parentSlot && componentDelta.get(parentSlot)) || { dx: 0, dy: 0 }
+      Array.from(container.children).forEach((child, i) => {
+        const from = beforeList[Math.min(i, beforeList.length - 1)]
+        if (!from) return
+        const to = screenRectOf(child)
+        const dx = from.left - to.left - parentDelta.dx
+        const dy = from.top - to.top - parentDelta.dy
+        if (Math.abs(dx) >= 1 || Math.abs(dy) >= 1) {
+          cellMoves.push({ child, dx, dy })
+        }
+      })
+    })
+
+    // ===== 第二趟：统一创建动画 =====
+    componentMoves.forEach(({ el, dx, dy }) => {
+      run(el, [
+        { translate: `${dx}px ${dy}px` },
+        { translate: '0px 0px' }
+      ])
+    })
+    // 课程格子：与父组件同 timing 的独立滑动 + 同步淡入（简称↔全称过渡）。
+    // 使用独立 translate 属性（而非 transform），避免与格子自身的
+    // enterCurrentClass / enterBreakClass CSS 动画（操作 transform）互相覆盖。
+    cellMoves.forEach(({ child, dx, dy }) => {
+      run(child, [
+        { translate: `${dx}px ${dy}px`, opacity: 0.25 },
+        { translate: '0px 0px', opacity: 1 }
+      ])
+    })
+    return DURATION + 80
+  }
+
+  ipcRenderer.on('position-mode-changed', async (e, mode) => {
     // 软件设置中选择窗口位置后立即预览（尚未保存到文件）
     if (mode === 'top-right' || mode === 'right' || mode === 'top') {
-      settings.window_position = mode;
+      settings.window_position = mode
     }
+    const nextMode = settings?.window_position || 'top'
+    const prevMode = document.documentElement.dataset.position || 'top'
+    if (prevMode === nextMode) { applyPositionMode(); reportWindowBounds(); return }
+
+    const before = capturePositionSnapshot()
+    // 遮住“新布局 + 旧窗口”的过渡帧（FLIP 动画创建后同帧移除）
+    document.body.classList.add('position-switching')
+    positionSwitchAnimating = true
+    settings.window_position = nextMode
     applyPositionMode()
     // right 模式下课表格子要切换全称/简称与内联倒计时，强制重渲染
     //（tick 有数据对比缓存，数据不变时不会重绘）
     tick(true)
-    reportWindowBounds()
-    animatePositionSwitch()
+    // 悬浮倒计时框跳过本次 0px 动画、直接落到新布局终态，保证尺寸测量稳定
+    finalizeCountdownPopupImmediately()
+    try {
+      // 等列宽统一（--right-column-width 首次写入会再引发布局变化）与布局收敛
+      let size = null
+      for (let i = 0; i < 5; i++) {
+        await nextAnimationFrame()
+        size = measureContentSize(nextMode)
+        if (size && !size.restylePending) break
+      }
+      // 主进程一次性把窗口放到终态矩形（right: 贴右竖窗；top 系列: 全宽横条）
+      await ipcRenderer.invoke('apply-position-bounds', size)
+      // 等待视口 resize 在渲染端落地后再拍 after
+      await nextAnimationFrame()
+      await nextAnimationFrame()
+      const total = playPositionFlip(before) || 500
+      // 动画先创建（fill:both 首帧即把元素锁定在旧位置）再移除遮罩，无中间态绘制
+      document.body.classList.remove('position-switching')
+      setTimeout(() => {
+        positionSwitchAnimating = false
+        lastReportedBounds = { width: 0, height: 0 }
+        reportWindowBounds()
+      }, total)
+    } catch (error) {
+      console.error('position switch animation failed:', error)
+      document.body.classList.remove('position-switching')
+      positionSwitchAnimating = false
+      reportWindowBounds()
+    }
   })
 
   ipcRenderer.on('settings-reloaded', () => {

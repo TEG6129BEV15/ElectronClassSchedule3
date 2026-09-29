@@ -257,7 +257,6 @@ function ScheduleMap({ days, configuredSchedule, config, bump }) {
   return (
     <div className="panel">
       <h3>每天加载的课表</h3>
-      <p className="field-help">为每个星期选择需要加载的课表，保存后会写入 daily_schedule。</p>
       <table className="schedule-map-table">
         <thead>
           <tr>

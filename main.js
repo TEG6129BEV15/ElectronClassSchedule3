@@ -9,7 +9,7 @@ const Store = require('electron-store');
 const { DisableMinimize } = require('electron-disable-minimize');
 const store = new Store();
 
-// ===== Win11 亚克力材质（仅用于设置类窗口） =====
+// ===== Win11 Mica 云母材质（仅用于设置类窗口；Win10/21H2 无 Mica，回退 user32 亚克力） =====
 // mica-electron 在 require 时会追加 enable-transparent-visuals 命令行开关，必须在 app.ready 之前加载。
 let micaElectron = null;
 let acrylicAvailable = false;
@@ -177,17 +177,92 @@ function saveWindowSizeOnClose(key, winObj) {
 
 // 读取设置中的主题模式（auto/dark/light），用于决定 DWM 材质深浅色
 function readThemeMode() {
+    const loaded = readSettingsObject();
+    return loaded.theme_mode === 'dark' || loaded.theme_mode === 'light' ? loaded.theme_mode : 'auto';
+}
+
+// ===== Theme 主题包 =====
+// Theme 文件夹与 js/ 配置同级（打包后位于 resources/app/Theme）。
+// 每个子文件夹是一个主题包，内含 index.json 索引、若干 css 文件与字体文件：
+// { "name": "显示名", "css": ["a.css"], "fonts": [{ "file": "x.ttf", "family": "X", "weight": "normal", "style": "normal" }] }
+// 载入主题时只读索引，字体经 FontFace 注册、css 经 <link> 注入。
+const { pathToFileURL } = require('url');
+const THEMES_DIR = path.join(__dirname, 'Theme');
+
+function ensureThemeDir() {
+    try { fs.mkdirSync(THEMES_DIR, { recursive: true }); } catch (error) { /* 忽略 */ }
+}
+
+function readSettingsObject() {
     try {
         const settingsPath = path.join(__dirname, 'js', 'settings.js');
         // 去除 BOM：个别编辑器保存的配置文件带 BOM 时，new Function 会直接抛语法错误
         const code = fs.readFileSync(settingsPath, 'utf8').replace(/^\uFEFF/, '');
         const reader = new Function(`${code}; return { _settings, settings };`);
         const result = reader();
-        const loaded = result && (result._settings || result.settings);
-        return loaded && (loaded.theme_mode === 'dark' || loaded.theme_mode === 'light') ? loaded.theme_mode : 'auto';
+        return (result && (result._settings || result.settings)) || {};
     } catch (error) {
-        return 'auto';
+        return {};
     }
+}
+
+// 扫描 Theme 目录，返回全部主题包（资源路径已转成 file:// URL）
+function readThemePacks() {
+    ensureThemeDir();
+    const packs = [];
+    let entries = [];
+    try {
+        entries = fs.readdirSync(THEMES_DIR, { withFileTypes: true });
+    } catch (error) {
+        return packs;
+    }
+    for (const entry of entries) {
+        if (!entry.isDirectory()) continue;
+        const dir = path.join(THEMES_DIR, entry.name);
+        let manifest = null;
+        try {
+            manifest = JSON.parse(fs.readFileSync(path.join(dir, 'index.json'), 'utf8'));
+        } catch (error) {
+            // 没有合法 index.json 的子文件夹不是主题包，跳过
+            continue;
+        }
+        if (!manifest || typeof manifest !== 'object') continue;
+        const cssList = Array.isArray(manifest.css) ? manifest.css : [];
+        const css = cssList
+            .filter((f) => typeof f === 'string' && f.trim())
+            // 禁止路径逃逸主题文件夹
+            .filter((f) => !f.split(/[\\/]/).includes('..'))
+            .map((f) => pathToFileURL(path.join(dir, f)).href);
+        const fontList = Array.isArray(manifest.fonts) ? manifest.fonts : [];
+        const fonts = fontList
+            .filter((f) => f && typeof f.file === 'string' && typeof f.family === 'string' && f.family.trim())
+            .filter((f) => !f.file.split(/[\\/]/).includes('..'))
+            .map((f) => ({
+                family: String(f.family),
+                src: pathToFileURL(path.join(dir, f.file)).href,
+                weight: f.weight ? String(f.weight) : 'normal',
+                style: f.style ? String(f.style) : 'normal',
+            }));
+        packs.push({ id: entry.name, name: manifest.name ? String(manifest.name) : entry.name, css, fonts });
+    }
+    packs.sort((a, b) => a.id.localeCompare(b.id, 'zh-Hans-CN'));
+    return packs;
+}
+
+function getActiveThemePack() {
+    const activeId = readSettingsObject().active_theme;
+    if (!activeId || typeof activeId !== 'string') return null;
+    return readThemePacks().find((pack) => pack.id === activeId) || null;
+}
+
+// 设置变更后把当前启用的主题包广播给所有窗口（主窗口会 reload 自取，其余窗口靠事件热切换）
+function broadcastActiveTheme() {
+    const payload = getActiveThemePack();
+    BrowserWindow.getAllWindows().forEach((winObj) => {
+        if (!winObj.isDestroyed() && winObj.webContents && !winObj.webContents.isDestroyed()) {
+            winObj.webContents.send('active-theme-changed', payload);
+        }
+    });
 }
 
 // 主窗口位置模式：top（顶部居中，默认）/ top-right（顶部靠右）/ right（右侧竖排）
@@ -291,7 +366,7 @@ function broadcastThemeMode(mode) {
     }
 }
 
-// 创建带 Win11 亚克力材质的设置窗口。
+// 创建带 Win11 Mica 材质的设置窗口。
 // 非 Windows 或 mica-electron 不可用时静默降级为普通 BrowserWindow（渲染层保持不透明外观）。
 function createSettingsWindow(options) {
     if (!acrylicAvailable) {
@@ -302,9 +377,9 @@ function createSettingsWindow(options) {
     winObj.__acrylic = true;
     try {
         if (dwmBackdropSupported) {
-            // Win11 22H2+：DWM 桌面亚克力（系统原生 Mica/Acrylic）
+            // Win11 22H2+：DWM Mica 云母材质
             winObj.__acrylicBackend = 'dwm';
-            winObj.setMicaAcrylicEffect();
+            winObj.setMicaEffect();
             winObj.setRoundedCorner();
         } else {
             // Win10 / Win11 21H2：user32 亚克力。
@@ -472,6 +547,7 @@ async function openCourseFusionWindow() {
 }
 
 app.whenReady().then(() => {
+    ensureThemeDir()
     createWindow()
     createTrayMenu()
     Menu.setApplicationMenu(null)
@@ -683,9 +759,23 @@ ipcMain.on('window-position-preview', (event, mode) => {
     const normalized = (mode === 'top-right' || mode === 'right') ? mode : 'top';
     if (!win || win.isDestroyed()) return;
     win.__positionMode = normalized;
-    // 不立即按默认尺寸 setBounds：渲染层同步重排后会上报精确内容尺寸，
-    // 由 main-window-height 一次性调整到位，避免“先小窗再大窗”的多次跳变
+    // 渲染端完成新模式布局后会经 apply-position-bounds 一次性 setBounds 到终态
     win.webContents.send('position-mode-changed', normalized);
+})
+
+// 位置切换动画的"终态尺寸"通道：渲染端完成新模式布局后调用，
+// 主窗口一次性 setBounds 到终态矩形，渲染端再播放 FLIP 动画，
+// 避免"先在旧窗口里播动画、结束后再跳变尺寸"的割裂感
+ipcMain.handle('apply-position-bounds', (event, contentSize) => {
+    if (!win || win.isDestroyed()) return false;
+    const mode = win.__positionMode || 'top';
+    const next = getMainWindowBounds(mode, contentSize);
+    const current = win.getBounds();
+    if (current.x !== next.x || current.y !== next.y
+        || current.width !== next.width || current.height !== next.height) {
+        win.setBounds(next);
+    }
+    return next;
 })
 
 let scheduleDialog = null;
@@ -867,15 +957,19 @@ ipcMain.handle('save-config-file', async (event, config) => {
     return true;
 })
 
-ipcMain.handle('save-settings-file', async (event, settings) => {
+ipcMain.handle('save-settings-file', async (event, settings, options) => {
     const settingsPath = path.join(__dirname, 'js', 'settings.js');
     const formatted = `const _settings = ${JSON.stringify(settings, null, 4)}\n\nvar settings = JSON.parse(JSON.stringify(_settings))\n`;
     fs.writeFileSync(settingsPath, formatted, 'utf8');
-    // 主题模式可能随设置一起改变，立即同步主界面与所有亚克力窗口的深浅色
+    // 主题模式可能随设置一起改变，立即同步主界面与所有 Mica 窗口的深浅色
     if (settings && (settings.theme_mode === 'dark' || settings.theme_mode === 'light' || settings.theme_mode === 'auto')) {
         broadcastThemeMode(settings.theme_mode);
     }
-    if (win && !win.isDestroyed()) {
+    // 启用的主题包可能改变，热广播到所有窗口
+    broadcastActiveTheme();
+    // 窗口位置切换已由 window-position-preview 热应用并播放动画，
+    // 随后的落盘不需要再整页 reload（否则会打断动画并闪一帧）
+    if (win && !win.isDestroyed() && !options?.skipReload) {
         reloadMainWindow();
     }
     const sourceWindow = BrowserWindow.fromWebContents(event.sender);
@@ -894,25 +988,13 @@ ipcMain.handle('save-main-css-file', async (event, css) => {
     return true;
 })
 
-ipcMain.handle('import-theme-css-file', async () => {
-    const result = await dialog.showOpenDialog({
-        title: '导入 CSS 主题配置',
-        properties: ['openFile'],
-        filters: [{ name: 'CSS 文件', extensions: ['css'] }]
-    });
-    if (result.canceled || !result.filePaths.length) return null;
-    const css = fs.readFileSync(result.filePaths[0], 'utf8');
-    // 校验完整性：提取 --var: value 对
-    const vars = {};
-    const regex = /(--[a-zA-Z0-9-]+)\s*:\s*([^;{}]+);/g;
-    let match;
-    while ((match = regex.exec(css)) !== null) {
-        vars[match[1].trim()] = match[2].trim();
-    }
-    if (Object.keys(vars).length === 0) {
-        throw new Error('CSS 文件中未找到任何 CSS 变量定义（--xxx: value）');
-    }
-    return vars;
+ipcMain.handle('list-theme-packs', async () => readThemePacks())
+
+ipcMain.handle('get-active-theme-pack', async () => getActiveThemePack())
+
+ipcMain.on('open-theme-folder', async () => {
+    ensureThemeDir();
+    shell.openPath(THEMES_DIR);
 })
 
 ipcMain.on('pop', (e, arg) => {

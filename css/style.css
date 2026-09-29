@@ -96,6 +96,13 @@
     opacity: 0.2;
 }
 
+/* 位置模式切换中间态：布局已切到新模式、窗口矩形尚未到位的一两帧里，
+   竖排内容会在旧窄视口中大面积出界，整体遮住直到 FLIP 动画首帧就位 */
+body.position-switching #globalContainer,
+body.position-switching .miniCountdown {
+    visibility: hidden;
+}
+
 .componentRow[data-component-row="1"] {
     margin-top: var(--second-component-row-offset, 20px);
 }

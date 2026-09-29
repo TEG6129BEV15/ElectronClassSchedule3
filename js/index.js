@@ -152,9 +152,12 @@ function getCurrentEditedDate() {
     return d;
 }
 
-function getCurrentEditedDay(date) {
-    if (dayOffset === -1) 
-        return date.getDay();
+// 手动“切换日程”时，dayOffset 存的是 daily_class 数组的精确索引，
+// 可以是 7、8 等命名课表（如“第一天”），绝不能当作星期几再做 % 7——
+// 否则索引 7 会坍缩到 0，加载成第一个课表。
+// 返回当前生效的手动索引；未选择或已跨自然天失效时返回 -1（同时清理 localStorage）
+function getManualDayIndex() {
+    if (dayOffset === -1) return -1;
     if (setDayOffsetLastDay == new Date().getDay()) {
         return dayOffset;
     }
@@ -162,7 +165,42 @@ function getCurrentEditedDay(date) {
     localStorage.setItem('setDayOffsetLastDay', '-1')
     dayOffset = -1
     setDayOffsetLastDay = -1
-    return date.getDay();
+    return -1;
+}
+
+// 供“切换日程”对话框默认高亮项使用：手动模式返回 daily_class 索引，否则返回星期几
+function getCurrentEditedDay(date) {
+    const manualIndex = getManualDayIndex();
+    return manualIndex === -1 ? date.getDay() : manualIndex;
+}
+
+// 解析当前应加载的 daily_class 索引。
+// weekdayDelta 仅在自动模式下有效（“显示次日课程”按自然日 +1）；
+// 手动切换时锁定用户选定的索引，不做星期取模。
+function resolveScheduleIndex(weekdayDelta = 0) {
+    const schedules = Array.isArray(scheduleConfig.daily_class) ? scheduleConfig.daily_class : [];
+    const manualIndex = getManualDayIndex();
+    if (manualIndex !== -1) {
+        return schedules[manualIndex] ? manualIndex : -1;
+    }
+    const date = getCurrentEditedDate();
+    // date.getDay(): 0 = 周日 ... 6 = 周六，与 daily_class 前 7 项顺序一致
+    const dayOfWeek = (date.getDay() + weekdayDelta + 7) % 7;
+    const scheduleIndex = Array.isArray(scheduleConfig.daily_schedule) &&
+        scheduleConfig.daily_schedule[dayOfWeek] !== undefined
+        ? Number(scheduleConfig.daily_schedule[dayOfWeek])
+        : dayOfWeek;
+    return Number.isInteger(scheduleIndex) && schedules[scheduleIndex] ? scheduleIndex : -1;
+}
+
+function getCurrentDayScheduleConfig(dayOffset = 0) {
+    const schedules = Array.isArray(scheduleConfig.daily_class) ? scheduleConfig.daily_class : [];
+    const scheduleIndex = resolveScheduleIndex(dayOffset);
+    return scheduleIndex >= 0 ? schedules[scheduleIndex] : null;
+}
+
+function getCurrentDayScheduleIndex(dayOffset = 0) {
+    return resolveScheduleIndex(dayOffset);
 }
 
 function timeToSeconds(time) {
@@ -211,31 +249,6 @@ function resolveWeeklySubject(subject, weekNumber) {
         return stripWeekRotationLabel(subject[rotationIndex]);
     }
     return stripWeekRotationLabel(subject);
-}
-
-function getCurrentDayScheduleConfig(dayOffset = 0) {
-    const date = getCurrentEditedDate();
-    const currentDayOfWeek = getCurrentEditedDay(date); // 0 = Sunday, 1 = Monday, ...
-    const dayOfWeek = (currentDayOfWeek + dayOffset + 7) % 7;
-    const schedules = Array.isArray(scheduleConfig.daily_class) ? scheduleConfig.daily_class : [];
-    const scheduleIndex = Array.isArray(scheduleConfig.daily_schedule) &&
-        scheduleConfig.daily_schedule[dayOfWeek] !== undefined
-        ? Number(scheduleConfig.daily_schedule[dayOfWeek])
-        : dayOfWeek;
-
-    return Number.isInteger(scheduleIndex) ? schedules[scheduleIndex] : null;
-}
-
-function getCurrentDayScheduleIndex(dayOffset = 0) {
-    const date = getCurrentEditedDate();
-    const currentDayOfWeek = getCurrentEditedDay(date);
-    const dayOfWeek = (currentDayOfWeek + dayOffset + 7) % 7;
-    const schedules = Array.isArray(scheduleConfig.daily_class) ? scheduleConfig.daily_class : [];
-    const scheduleIndex = Array.isArray(scheduleConfig.daily_schedule) &&
-        scheduleConfig.daily_schedule[dayOfWeek] !== undefined
-        ? Number(scheduleConfig.daily_schedule[dayOfWeek])
-        : dayOfWeek;
-    return Number.isInteger(scheduleIndex) && schedules[scheduleIndex] ? scheduleIndex : -1;
 }
 
 function getCurrentDaySchedule() {

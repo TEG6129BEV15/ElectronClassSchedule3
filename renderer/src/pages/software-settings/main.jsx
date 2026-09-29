@@ -2,10 +2,12 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { Button, Input, Select, Switch } from '@fluentui/react-components';
 import { AppTheme, initialThemeFromQuery } from '../../common/theme.jsx';
+import { useThemePack } from '../../common/themePack.js';
 import TitleBar from '../../common/TitleBar.jsx';
 import { ipcRenderer } from '../../common/electron.js';
 import { Svg, ICONS } from '../../common/icons.jsx';
 import ComponentsPage, { createComponentId, getConfiguredComponentRows } from './ComponentsPage.jsx';
+import ThemePacksPage from './ThemePacksPage.jsx';
 import '../../common/tokens.css';
 import '../../common/chrome.css';
 import './software-settings.css';
@@ -13,7 +15,8 @@ import './software-settings.css';
 const NAV_ITEMS = [
   { page: 'basic', label: '基础设置', icon: ICONS.basicSettings },
   { page: 'components', label: '组件设置', icon: ICONS.components },
-  { page: 'theme', label: '主题', icon: ICONS.style },
+  { page: 'appearance', label: '外观', icon: ICONS.style },
+  { page: 'themes', label: '主题', icon: ICONS.palette },
   { page: 'reminder', label: '提醒', icon: ICONS.reminder },
 ];
 
@@ -54,22 +57,46 @@ function getEffectiveRotationWeek(rotationWeeks, rotationOffset) {
   return (((weekNumber + offset) % rotationWeeks) + rotationWeeks) % rotationWeeks;
 }
 
-const CSS_VAR_LABELS = [
-  { var: '--center-font-size', label: '中心字号' },
-  { var: '--corner-font-size', label: '角标字号' },
-  { var: '--countdown-font-size', label: '倒计时字号' },
-  { var: '--global-border-radius', label: '全局圆角' },
-  { var: '--global-bg-opacity', label: '背景透明度' },
-  { var: '--container-bg-padding', label: '容器内边距' },
-  { var: '--countdown-bg-padding', label: '倒计时内边距' },
-  { var: '--container-space', label: '组件间距' },
-  { var: '--top-space', label: '顶部间距' },
-  { var: '--main-horizontal-space', label: '主水平间距' },
-  { var: '--divider-width', label: '分隔线宽度' },
-  { var: '--divider-margin', label: '分隔线边距' },
-  { var: '--triangle-size', label: '三角尺寸' },
-  { var: '--sub-font-size', label: '副文字号' },
+// 外观参数规格。unit='px' 表示长度值：文本框里只填数字（多个数字用空格分隔，
+// 如内边距 "8 14"），保存时自动给每个数字补 px；背景透明度是无单位数字。
+const CSS_VAR_SPECS = [
+  { var: '--center-font-size', label: '中心字号', unit: 'px' },
+  { var: '--corner-font-size', label: '角标字号', unit: 'px' },
+  { var: '--countdown-font-size', label: '倒计时字号', unit: 'px' },
+  { var: '--global-border-radius', label: '全局圆角', unit: 'px' },
+  { var: '--global-bg-opacity', label: '背景透明度', unit: '' },
+  { var: '--container-bg-padding', label: '容器内边距', unit: 'px' },
+  { var: '--countdown-bg-padding', label: '倒计时内边距', unit: 'px' },
+  { var: '--container-space', label: '组件间距', unit: 'px' },
+  { var: '--top-space', label: '顶部间距', unit: 'px' },
+  { var: '--main-horizontal-space', label: '主水平间距', unit: 'px' },
+  { var: '--divider-width', label: '分隔线宽度', unit: 'px' },
+  { var: '--divider-margin', label: '分隔线边距', unit: 'px' },
+  { var: '--triangle-size', label: '三角尺寸', unit: 'px' },
+  { var: '--sub-font-size', label: '副文字号', unit: 'px' },
 ];
+
+const NUMBER_RE = /^-?\d+(\.\d+)?$/;
+
+// 文件里存的是 "8px 14px"，输入框里只显示 "8 14"
+function cssValueToDraft(spec, rawValue) {
+  const text = String(rawValue ?? '').trim();
+  if (!text) return '';
+  if (spec.unit === 'px') return text.replace(/px/gi, '').replace(/\s+/g, ' ').trim();
+  return text;
+}
+
+// 把输入框草稿转回 CSS 值；含非法数字时返回 null
+function draftToCssValue(spec, draft) {
+  const tokens = String(draft ?? '').trim().split(/\s+/).filter(Boolean);
+  if (tokens.length === 0) return '';
+  if (spec.unit === 'px') {
+    if (!tokens.every((token) => NUMBER_RE.test(token))) return null;
+    return tokens.map((token) => `${token}px`).join(' ');
+  }
+  if (tokens.length !== 1 || !NUMBER_RE.test(tokens[0])) return null;
+  return tokens[0];
+}
 
 function SoftwareSettingsApp({ onThemeModeChange }) {
   const configRef = useRef(null);
@@ -84,17 +111,32 @@ function SoftwareSettingsApp({ onThemeModeChange }) {
   const [cssStyleObj, setCssStyleObj] = useState({});
   const [reminderClass, setReminderClass] = useState({});
   const [reminderCustom, setReminderCustom] = useState([]);
+  const [activeTheme, setActiveTheme] = useState('');
   const [timeOffsetText, setTimeOffsetText] = useState('0');
   // 首帧与 URL 参数（主进程读磁盘注入）保持一致，避免挂载时 effect 先把 auto
   // 推给 Root 造成浅色闪帧；若之后 loadSettings 回包慢/失败，窗口就会残留浅色
   const [themeMode, setThemeMode] = useState(() => initialThemeFromQuery() || 'auto');
   const [positionMode, setPositionMode] = useState('top');
+  // 首次读取完成前，各类“即改即生效”的自动保存不能误触发
+  const loadedRef = useRef(false);
+  // 各设置域共用的防抖定时器
+  const persistTimersRef = useRef(new Map());
+  // 左侧导航折叠状态持久化（file:// 下 localStorage 与主界面共享，使用独立键名）
+  const [navCollapsed, setNavCollapsed] = useState(() => localStorage.getItem('softwareSettingsNavCollapsed') === '1');
+  const toggleNav = useCallback(() => {
+    setNavCollapsed((prev) => {
+      const next = !prev;
+      localStorage.setItem('softwareSettingsNavCollapsed', next ? '1' : '0');
+      return next;
+    });
+  }, []);
 
   const settings = settingsRef.current;
   const config = configRef.current;
   const rotationOffset = settings?.rotation_offset || {};
 
   const loadSettings = useCallback(() => {
+    loadedRef.current = false;
     Promise.all([
       ipcRenderer.invoke('read-config-file'),
       ipcRenderer.invoke('read-settings-file'),
@@ -104,13 +146,21 @@ function SoftwareSettingsApp({ onThemeModeChange }) {
       settingsRef.current.component_layout = getConfiguredComponentRows(settingsData, data);
       setRows(settingsRef.current.component_layout);
       setSelectedId(null);
-      setCssStyleObj(settingsData?.css_style || {});
+      // 外观参数以“去掉 px 的草稿”形式放进输入框
+      const drafts = {};
+      CSS_VAR_SPECS.forEach((spec) => {
+        const draft = cssValueToDraft(spec, settingsData?.css_style?.[spec.var]);
+        if (draft !== '') drafts[spec.var] = draft;
+      });
+      setCssStyleObj(drafts);
       setReminderClass(settingsData?.reminder_class || {});
       setReminderCustom(Array.isArray(settingsData?.reminder_custom) ? settingsData.reminder_custom : []);
       setThemeMode(settingsData?.theme_mode || 'auto');
       setPositionMode(settingsData?.window_position || 'top');
+      setActiveTheme(settingsData?.active_theme || '');
       setTimeOffsetText(String(Number(localStorage.getItem('timeOffset') || 0)));
       setStatus('');
+      loadedRef.current = true;
       bump();
     }).catch((error) => {
       console.error(error);
@@ -125,6 +175,33 @@ function SoftwareSettingsApp({ onThemeModeChange }) {
   useEffect(() => {
     if (onThemeModeChange) onThemeModeChange(themeMode);
   }, [themeMode, onThemeModeChange]);
+
+  // ===== 统一持久化：所有设置操作后立即（或短暂防抖）写入并生效，无需保存按钮 =====
+  // options.skipReload：该项变更已通过专用预览通道热应用（如窗口位置），
+  // 落盘后不需要主窗口整页 reload
+  const persistSettings = useCallback((mutate, message, options) => {
+    if (!settingsRef.current) return;
+    const nextSettings = JSON.parse(JSON.stringify(settingsRef.current));
+    mutate(nextSettings);
+    // 乐观更新引用，连续编辑时基于最新值叠加
+    settingsRef.current = nextSettings;
+    ipcRenderer.invoke('save-settings-file', nextSettings, options).then(() => {
+      setStatus(message || '已自动保存并生效');
+      bump();
+    }).catch((error) => {
+      console.error(error);
+      setStatus('自动保存失败，请检查配置格式');
+    });
+  }, [bump]);
+
+  const schedulePersist = useCallback((key, mutate, message, delay = 500) => {
+    const timers = persistTimersRef.current;
+    if (timers.has(key)) clearTimeout(timers.get(key));
+    timers.set(key, setTimeout(() => {
+      timers.delete(key);
+      persistSettings(mutate, message);
+    }, delay));
+  }, [persistSettings]);
 
   const changeRotationOffset = (weeks, selectedWeek) => {
     if (!settingsRef.current) return;
@@ -167,30 +244,29 @@ function SoftwareSettingsApp({ onThemeModeChange }) {
     setStatus('时间偏移已生效');
   };
 
-  const saveBasicSettings = () => {
-    if (!settingsRef.current) return;
-    const nextSettings = JSON.parse(JSON.stringify(settingsRef.current));
-    nextSettings.rotation_offset = {
-      2: Number(nextSettings.rotation_offset?.[2] ?? 0),
-      3: Number(nextSettings.rotation_offset?.[3] ?? 0),
-      4: Number(nextSettings.rotation_offset?.[4] ?? 0),
-    };
-    nextSettings.theme_mode = themeMode;
-    nextSettings.window_position = positionMode;
-    ipcRenderer.invoke('save-settings-file', nextSettings).then(() => {
-      settingsRef.current = nextSettings;
-      setStatus('设置已保存');
-      bump();
-    }).catch((error) => {
-      console.error(error);
-      setStatus('保存失败，请检查配置格式');
-    });
+  // 深浅色：选择即持久化，主进程广播到全部窗口
+  const changeThemeMode = (nextMode) => {
+    setThemeMode(nextMode);
+    persistSettings((nextSettings) => {
+      nextSettings.theme_mode = nextMode;
+    }, '深浅色已生效');
   };
 
-  const saveComponentSettings = () => {
-    if (!configRef.current) return;
+  // 窗口位置：先经预览通道让主窗口热重排并播放 FLIP 过渡动画（不 reload），
+  // 再落盘且告知主进程跳过 reload，避免整页重载把动画打断成一帧跳变
+  const changePositionMode = (nextMode) => {
+    setPositionMode(nextMode);
+    ipcRenderer.send('window-position-preview', nextMode);
+    persistSettings((nextSettings) => {
+      nextSettings.window_position = nextMode;
+    }, '窗口位置已生效', { skipReload: true });
+  };
+
+  // 组件布局同时写 config（组件专属选项）与 settings（布局）
+  const flushComponentSettings = useCallback(() => {
+    if (!configRef.current || !settingsRef.current) return;
     const nextConfig = JSON.parse(JSON.stringify(configRef.current));
-    const nextSettings = JSON.parse(JSON.stringify(settingsRef.current || {}));
+    const nextSettings = JSON.parse(JSON.stringify(settingsRef.current));
     const layout = rows.map((row) => row.map((component) => ({
       id: component.id,
       type: component.type,
@@ -213,125 +289,97 @@ function SoftwareSettingsApp({ onThemeModeChange }) {
     ]).then(() => {
       configRef.current = nextConfig;
       settingsRef.current = nextSettings;
-      const normalized = getConfiguredComponentRows(nextSettings, nextConfig);
-      settingsRef.current.component_layout = normalized;
-      setRows(normalized);
-      setSelectedId(null);
-      setStatus('组件设置已保存');
+      settingsRef.current.component_layout = layout;
+      setStatus('组件设置已自动保存并生效');
       bump();
     }).catch((error) => {
       console.error(error);
-      setStatus('组件设置保存失败');
+      setStatus('组件设置自动保存失败');
     });
+  }, [rows, bump]);
+
+  // rows 任意变动（增删/排序/选项）后防抖落盘，不再需要“保存组件设置”按钮
+  useEffect(() => {
+    if (!loadedRef.current) return;
+    const timer = setTimeout(flushComponentSettings, 600);
+    return () => clearTimeout(timer);
+  }, [rows, flushComponentSettings]);
+
+  // 外观参数：输入后防抖自动保存（px 由草稿自动补全）
+  useEffect(() => {
+    if (!loadedRef.current) return;
+    const timer = setTimeout(() => {
+      const nextCssStyle = {};
+      for (const spec of CSS_VAR_SPECS) {
+        const value = draftToCssValue(spec, cssStyleObj[spec.var] ?? '');
+        if (value === null) {
+          setStatus(`「${spec.label}」只能填写数字${spec.unit === 'px' ? '（多个数字用空格分隔）' : ''}`);
+          return;
+        }
+        if (value !== '') nextCssStyle[spec.var] = value;
+      }
+      persistSettings((nextSettings) => {
+        nextSettings.css_style = nextCssStyle;
+      }, '外观设置已自动保存并生效');
+    }, 500);
+    return () => clearTimeout(timer);
+  }, [cssStyleObj, persistSettings]);
+
+  // 提醒设置（开关/秒数/文案/自定义提醒）统一防抖落盘
+  const persistReminder = (classOverride, customOverride) => {
+    const nextClass = classOverride !== undefined ? classOverride : reminderClass;
+    const nextCustom = customOverride !== undefined ? customOverride : reminderCustom;
+    schedulePersist('reminder', (nextSettings) => {
+      nextSettings.reminder_class = nextClass;
+      nextSettings.reminder_custom = nextCustom;
+    }, '提醒设置已自动保存并生效', 400);
   };
 
-  const saveThemeSettings = () => {
-    if (!configRef.current) return;
-    const nextSettings = JSON.parse(JSON.stringify(settingsRef.current || {}));
-    nextSettings.css_style = cssStyleObj;
-    ipcRenderer.invoke('save-settings-file', nextSettings).then(() => {
-      settingsRef.current = nextSettings;
-      setStatus('主题设置已保存');
-      bump();
-    }).catch((error) => {
-      console.error(error);
-      setStatus('主题设置保存失败');
-    });
+  // 主题包开关：最多启用一个；传空字符串表示全部关闭、恢复默认主题
+  const selectTheme = (themeId) => {
+    setActiveTheme(themeId);
+    persistSettings((nextSettings) => {
+      if (themeId) nextSettings.active_theme = themeId;
+      else delete nextSettings.active_theme;
+    }, themeId ? '主题已切换并立即生效' : '已恢复默认主题');
   };
-
-  const handleSave = () => {
-    if (activePage === 'theme') saveThemeSettings();
-    else if (activePage === 'components') saveComponentSettings();
-    else if (activePage === 'reminder') saveReminderSettings();
-    else saveBasicSettings();
-  };
-
-  const saveReminderSettings = () => {
-    if (!settingsRef.current) return;
-    const nextSettings = JSON.parse(JSON.stringify(settingsRef.current));
-    nextSettings.reminder_class = reminderClass;
-    nextSettings.reminder_custom = reminderCustom;
-    ipcRenderer.invoke('save-settings-file', nextSettings).then(() => {
-      settingsRef.current = nextSettings;
-      setStatus('提醒设置已保存');
-      bump();
-    }).catch((error) => {
-      console.error(error);
-      setStatus('提醒设置保存失败');
-    });
-  };
-
-  // “上课/即将上课/下课”开关切换后无需点击保存：防抖自动写入设置文件，
-  // 主进程保存后会重载主界面课表条，状态立即生效。
-  const reminderPersistTimer = useRef(null);
-  const autoPersistReminderClass = (nextClass) => {
-    if (!settingsRef.current) return;
-    settingsRef.current.reminder_class = nextClass;
-    if (reminderPersistTimer.current) clearTimeout(reminderPersistTimer.current);
-    reminderPersistTimer.current = setTimeout(() => {
-      if (!settingsRef.current) return;
-      const nextSettings = JSON.parse(JSON.stringify(settingsRef.current));
-      nextSettings.reminder_class = settingsRef.current.reminder_class;
-      nextSettings.reminder_custom = reminderCustom;
-      ipcRenderer.invoke('save-settings-file', nextSettings).then(() => {
-        settingsRef.current = nextSettings;
-        setStatus('提醒开关已自动保存并生效');
-        bump();
-      }).catch((error) => {
-        console.error(error);
-        setStatus('提醒设置保存失败');
-      });
-    }, 400);
-  };
-
-  const importThemeCss = () => {
-    ipcRenderer.invoke('import-theme-css-file').then((vars) => {
-      if (!vars) return;
-      setCssStyleObj((prev) => ({ ...prev, ...vars }));
-      setStatus(`已导入 ${Object.keys(vars).length} 个 CSS 变量，点击保存后生效`);
-      bump();
-    }).catch((error) => {
-      console.error(error);
-      setStatus('导入失败：' + (error.message || '未知错误'));
-    });
-  };
-
-  const saveButtonText = activePage === 'theme'
-    ? '保存主题'
-    : activePage === 'components'
-      ? '保存组件设置'
-      : activePage === 'reminder'
-        ? '保存提醒设置'
-        : '保存设置';
 
   return (
     <>
       <TitleBar title="软件设置" />
-      <div className="app ss-app">
-        <div className="toolbar-sticky">
-          <Button onClick={loadSettings}>刷新设置</Button>
-          <Button className="win-primary" appearance="primary" onClick={handleSave}>{saveButtonText}</Button>
-        </div>
+      <div className={`app ss-app app-shell${navCollapsed ? ' nav-collapsed' : ''}`}>
+        <aside className="nav-sidebar">
+          <div className="nav-rail-top">
+            <button
+              type="button"
+              className="nav-toggle"
+              title={navCollapsed ? '展开菜单' : '折叠菜单'}
+              aria-label={navCollapsed ? '展开菜单' : '折叠菜单'}
+              onClick={toggleNav}
+            >
+              <Svg size={18} viewBox="0 0 20 20" html={ICONS.menu} strokeWidth={1.6} />
+            </button>
+            <span className="nav-rail-brand">软件设置</span>
+          </div>
+          <nav className="nav-list">
+            {NAV_ITEMS.map((item) => (
+              <button
+                type="button"
+                key={item.page}
+                className={`nav-item${activePage === item.page ? ' active' : ''}`}
+                title={item.label}
+                onClick={() => { setActivePage(item.page); setStatus(''); }}
+              >
+                <Svg size={24} viewBox="0 0 24 24" html={item.icon} />
+                <span className="nav-label">{item.label}</span>
+              </button>
+            ))}
+          </nav>
+        </aside>
 
-        <div className="settings-app">
-          <aside className="nav-sidebar">
-            <div className="nav-brand">软件设置</div>
-            <nav className="nav-list">
-              {NAV_ITEMS.map((item) => (
-                <button
-                  type="button"
-                  key={item.page}
-                  className={`nav-item${activePage === item.page ? ' active' : ''}`}
-                  onClick={() => { setActivePage(item.page); setStatus(''); }}
-                >
-                  <Svg size={24} viewBox="0 0 24 24" html={item.icon} />
-                  <span>{item.label}</span>
-                </button>
-              ))}
-            </nav>
-          </aside>
-
-          <main className="main-content">
+        <div className="shell-body">
+          <div className="shell-scroll">
+            <main className="main-content">
             <section className={`ss-page${activePage === 'basic' ? ' active' : ''}`}>
               <div className="page-header">
                 <h1 className="page-title">基础设置</h1>
@@ -388,18 +436,13 @@ function SoftwareSettingsApp({ onThemeModeChange }) {
                   <Select
                     id="positionModeSelect"
                     value={positionMode}
-                    onChange={(event) => {
-                      const nextMode = event.target.value;
-                      setPositionMode(nextMode);
-                      // 选择后立即在主界面课表条预览，无需等待保存
-                      ipcRenderer.send('window-position-preview', nextMode);
-                    }}
+                    onChange={(event) => changePositionMode(event.target.value)}
                   >
                     <option value="top">顶部居中</option>
                     <option value="top-right">顶部靠右</option>
                     <option value="right">右侧竖排</option>
                   </Select>
-                  <p className="field-help">控制课表条在屏幕上的排列位置：顶部居中、顶部靠右（每行右对齐），或右侧竖排（各行从右到左、行内组件自上而下）。选择后立即生效，点击"保存设置"可永久保留。</p>
+                  <p className="field-help">控制课表条在屏幕上的排列位置：顶部居中、顶部靠右（每行右对齐），或右侧竖排（各行从右到左、行内组件自上而下），选择后立即生效并自动保存。</p>
                 </div>
               </div>
 
@@ -410,18 +453,13 @@ function SoftwareSettingsApp({ onThemeModeChange }) {
                   <Select
                     id="themeModeSelect"
                     value={themeMode}
-                    onChange={(event) => {
-                      const nextMode = event.target.value;
-                      setThemeMode(nextMode);
-                      // 选择后立即在主界面课表条及所有窗口预览，无需等待保存
-                      ipcRenderer.send('theme-mode-preview', nextMode);
-                    }}
+                    onChange={(event) => changeThemeMode(event.target.value)}
                   >
                     <option value="auto">跟随系统</option>
                     <option value="dark">深色</option>
                     <option value="light">浅色</option>
                   </Select>
-                  <p className="field-help">控制主界面课表条和所有设置窗口的深浅色，选择后立即生效，点击"保存设置"可永久保留。</p>
+                  <p className="field-help">控制主界面课表条和所有设置窗口的深浅色，选择后立即生效并自动保存。</p>
                 </div>
               </div>
             </section>
@@ -441,39 +479,51 @@ function SoftwareSettingsApp({ onThemeModeChange }) {
               />
             </section>
 
-            <section className={`ss-page${activePage === 'theme' ? ' active' : ''}`}>
+            <section className={`ss-page${activePage === 'appearance' ? ' active' : ''}`}>
               <div className="page-header">
-                <h1 className="page-title">主题</h1>
-                <p className="page-intro">调整主界面样式参数。每个参数都有中文说明，直接修改数值即可。</p>
+                <h1 className="page-title">外观</h1>
+                <p className="page-intro">调整主界面样式参数，只需填写数字（长度单位 px 会自动添加），修改后立即生效。</p>
               </div>
               <div className="panel">
-                <div className="field" style={{ marginBottom: '16px' }}>
-                  <Button className="win-small" onClick={importThemeCss}>导入 CSS 主题配置</Button>
-                  <p className="field-help">从本地选择 .css 文件，自动提取其中的 CSS 变量并合并到下方参数中。</p>
-                </div>
                 <h3>样式参数</h3>
                 <div className="settings-grid">
-                  {CSS_VAR_LABELS.map(({ var: varName, label }) => (
-                    <div className="field" key={varName}>
-                      <label htmlFor={`cssVar-${varName}`}>{label}</label>
-                      <Input
-                        id={`cssVar-${varName}`}
-                        type="text"
-                        value={cssStyleObj[varName] || ''}
-                        onChange={(event) => {
-                          const v = event.target.value;
-                          setCssStyleObj((prev) => {
-                            const next = { ...prev };
-                            if (v === '') delete next[varName];
-                            else next[varName] = v;
-                            return next;
-                          });
-                        }}
-                      />
+                  {CSS_VAR_SPECS.map((spec) => (
+                    <div className="field" key={spec.var}>
+                      <label htmlFor={`cssVar-${spec.var}`}>{spec.label}</label>
+                      <div className="unit-field">
+                        <Input
+                          id={`cssVar-${spec.var}`}
+                          type={spec.unit === 'px' ? 'text' : 'number'}
+                          inputMode="decimal"
+                          step={spec.unit === 'px' ? undefined : '0.1'}
+                          min={spec.unit === 'px' ? undefined : 0}
+                          max={spec.unit === 'px' ? undefined : 1}
+                          placeholder={spec.unit === 'px' ? '如 8 或 8 14' : '0 - 1'}
+                          value={cssStyleObj[spec.var] || ''}
+                          onChange={(event) => {
+                            // 长度框只允许数字、小数点、负号和空格；单位 px 不允许手输
+                            const v = spec.unit === 'px'
+                              ? event.target.value.replace(/[^\d.\s-]/g, '')
+                              : event.target.value;
+                            setCssStyleObj((prev) => {
+                              const next = { ...prev };
+                              if (v === '') delete next[spec.var];
+                              else next[spec.var] = v;
+                              return next;
+                            });
+                          }}
+                        />
+                        {spec.unit === 'px' && <span className="unit-suffix">px</span>}
+                      </div>
                     </div>
                   ))}
                 </div>
+                <p className="field-help">内边距等需要两个数值的参数，用空格分隔（如“8 14”）；留空则恢复默认值。</p>
               </div>
+            </section>
+
+            <section className={`ss-page${activePage === 'themes' ? ' active' : ''}`}>
+              <ThemePacksPage activeTheme={activeTheme} onSelectTheme={selectTheme} />
             </section>
 
             <section className={`ss-page${activePage === 'reminder' ? ' active' : ''}`}>
@@ -492,7 +542,7 @@ function SoftwareSettingsApp({ onThemeModeChange }) {
                         onChange={(e, d) => {
                           const next = { ...reminderClass, upcoming_enabled: d.checked };
                           setReminderClass(next);
-                          autoPersistReminderClass(next);
+                          persistReminder(next);
                         }}
                       />
                       即将上课提醒
@@ -501,7 +551,11 @@ function SoftwareSettingsApp({ onThemeModeChange }) {
                       type="number"
                       step="1"
                       value={String(reminderClass.upcoming_seconds ?? 300)}
-                      onChange={(e) => setReminderClass((p) => ({ ...p, upcoming_seconds: Number(e.target.value) }))}
+                      onChange={(e) => {
+                        const next = { ...reminderClass, upcoming_seconds: Number(e.target.value) };
+                        setReminderClass(next);
+                        persistReminder(next);
+                      }}
                       style={{ marginTop: '8px' }}
                     />
                     <p className="field-help">距离上课剩余多少秒时提醒</p>
@@ -513,7 +567,7 @@ function SoftwareSettingsApp({ onThemeModeChange }) {
                         onChange={(e, d) => {
                           const next = { ...reminderClass, start_enabled: d.checked };
                           setReminderClass(next);
-                          autoPersistReminderClass(next);
+                          persistReminder(next);
                         }}
                       />
                       上课提醒
@@ -526,7 +580,7 @@ function SoftwareSettingsApp({ onThemeModeChange }) {
                         onChange={(e, d) => {
                           const next = { ...reminderClass, end_enabled: d.checked };
                           setReminderClass(next);
-                          autoPersistReminderClass(next);
+                          persistReminder(next);
                         }}
                       />
                       下课提醒
@@ -540,7 +594,11 @@ function SoftwareSettingsApp({ onThemeModeChange }) {
                       id="rcUpcomingText"
                       type="text"
                       value={reminderClass.upcoming_text || ''}
-                      onChange={(e) => setReminderClass((p) => ({ ...p, upcoming_text: e.target.value }))}
+                      onChange={(e) => {
+                        const next = { ...reminderClass, upcoming_text: e.target.value };
+                        setReminderClass(next);
+                        persistReminder(next);
+                      }}
                     />
                   </div>
                   <div className="field">
@@ -549,7 +607,11 @@ function SoftwareSettingsApp({ onThemeModeChange }) {
                       id="rcStartText"
                       type="text"
                       value={reminderClass.start_text || ''}
-                      onChange={(e) => setReminderClass((p) => ({ ...p, start_text: e.target.value }))}
+                      onChange={(e) => {
+                        const next = { ...reminderClass, start_text: e.target.value };
+                        setReminderClass(next);
+                        persistReminder(next);
+                      }}
                     />
                   </div>
                   <div className="field">
@@ -558,7 +620,11 @@ function SoftwareSettingsApp({ onThemeModeChange }) {
                       id="rcEndText"
                       type="text"
                       value={reminderClass.end_text || ''}
-                      onChange={(e) => setReminderClass((p) => ({ ...p, end_text: e.target.value }))}
+                      onChange={(e) => {
+                        const next = { ...reminderClass, end_text: e.target.value };
+                        setReminderClass(next);
+                        persistReminder(next);
+                      }}
                     />
                   </div>
                 </div>
@@ -569,7 +635,9 @@ function SoftwareSettingsApp({ onThemeModeChange }) {
                   <h3>自定义文本提醒</h3>
                   <Button className="win-small" onClick={() => {
                     const id = `rc-${Date.now()}`;
-                    setReminderCustom((prev) => [...prev, { id, time: '12:00', text: '', color: '#114514', duration: 5000 }]);
+                    const updated = [...reminderCustom, { id, time: '12:00', text: '', color: '#114514', duration: 5000 }];
+                    setReminderCustom(updated);
+                    persistReminder(undefined, updated);
                   }}>新增</Button>
                 </div>
                 <p className="field-help">每天到指定时间触发提醒，可设多条。遮罩从课表中央扩散展开并显示文字。</p>
@@ -584,7 +652,11 @@ function SoftwareSettingsApp({ onThemeModeChange }) {
                           type="text"
                           placeholder="HH:MM"
                           value={item.time || ''}
-                          onChange={(e) => setReminderCustom((prev) => prev.map((it, j) => j === i ? { ...it, time: e.target.value } : it))}
+                          onChange={(e) => {
+                            const updated = reminderCustom.map((it, j) => j === i ? { ...it, time: e.target.value } : it);
+                            setReminderCustom(updated);
+                            persistReminder(undefined, updated);
+                          }}
                         />
                       </div>
                       <div className="field">
@@ -592,7 +664,11 @@ function SoftwareSettingsApp({ onThemeModeChange }) {
                         <Input
                           type="text"
                           value={item.text || ''}
-                          onChange={(e) => setReminderCustom((prev) => prev.map((it, j) => j === i ? { ...it, text: e.target.value } : it))}
+                          onChange={(e) => {
+                            const updated = reminderCustom.map((it, j) => j === i ? { ...it, text: e.target.value } : it);
+                            setReminderCustom(updated);
+                            persistReminder(undefined, updated);
+                          }}
                         />
                       </div>
                       <div className="field">
@@ -601,7 +677,11 @@ function SoftwareSettingsApp({ onThemeModeChange }) {
                           type="color"
                           className="native-color"
                           value={item.color || '#114514'}
-                          onChange={(e) => setReminderCustom((prev) => prev.map((it, j) => j === i ? { ...it, color: e.target.value } : it))}
+                          onChange={(e) => {
+                            const updated = reminderCustom.map((it, j) => j === i ? { ...it, color: e.target.value } : it);
+                            setReminderCustom(updated);
+                            persistReminder(undefined, updated);
+                          }}
                         />
                       </div>
                       <div className="field">
@@ -610,11 +690,19 @@ function SoftwareSettingsApp({ onThemeModeChange }) {
                           type="number"
                           step="100"
                           value={String(item.duration ?? 5000)}
-                          onChange={(e) => setReminderCustom((prev) => prev.map((it, j) => j === i ? { ...it, duration: Number(e.target.value) } : it))}
+                          onChange={(e) => {
+                            const updated = reminderCustom.map((it, j) => j === i ? { ...it, duration: Number(e.target.value) } : it);
+                            setReminderCustom(updated);
+                            persistReminder(undefined, updated);
+                          }}
                         />
                       </div>
                       <div className="field" style={{ alignSelf: 'flex-end' }}>
-                        <Button className="win-small" onClick={() => setReminderCustom((prev) => prev.filter((_, j) => j !== i))}>删除</Button>
+                        <Button className="win-small" onClick={() => {
+                          const updated = reminderCustom.filter((_, j) => j !== i);
+                          setReminderCustom(updated);
+                          persistReminder(undefined, updated);
+                        }}>删除</Button>
                       </div>
                     </div>
                   ))
@@ -622,8 +710,9 @@ function SoftwareSettingsApp({ onThemeModeChange }) {
               </div>
             </section>
 
-            <div className="status" aria-live="polite">{status}</div>
-          </main>
+            </main>
+          </div>
+          <div className="shell-status" aria-live="polite">{status}</div>
         </div>
       </div>
     </>
@@ -633,6 +722,8 @@ function SoftwareSettingsApp({ onThemeModeChange }) {
 createRoot(document.getElementById('root')).render(<SoftwareSettingsRoot />);
 
 function SoftwareSettingsRoot() {
+  // 主题包（Theme 文件夹）加载
+  useThemePack();
   // 首帧优先使用主进程通过 URL 参数注入的已保存主题模式，避免窗口打开瞬间闪现浅色
   const [mode, setMode] = useState(() => initialThemeFromQuery() || 'auto');
   useEffect(() => {

@@ -26,6 +26,8 @@ export function Svg({
 }
 
 export const ICONS = {
+  // 导航栏折叠/展开（汉堡）
+  menu: '<path d="M3 6h14M3 10h14M3 14h14"/>',
   // config-editor 主导航
   subject: '<path d="M7 4.5v11M7 4.5c1.8-1.3 4.5-1.5 6.5-.6v10.2c-2-.9-4.7-.7-6.5.6M7 15.5c1.8-1.3 4.5-1.5 6.5-.6"/>',
   timetable: '<circle cx="10" cy="10" r="7"/><path d="M10 6v4l2.8 2"/>',
@@ -47,4 +49,7 @@ export const ICONS = {
   componentCountdown: '<circle cx="10" cy="11" r="6.2"/><path d="M10 8v3.2l2.2 1.6M8.2 2.5h3.6M10 2.5v2.3"/>',
   componentTime: '<circle cx="10" cy="10" r="7"/><path d="M10 5.8V10l3 1.8"/>',
   componentCustomText: '<path d="M3.5 5.2h13M3.5 10h13M3.5 14.8h7.5"/>',
+  // 主题包页面
+  palette: '<path d="M12 3a9 9 0 0 0 0 18c.9 0 1.5-.7 1.5-1.5 0-.5-.2-.9-.5-1.2-.3-.3-.5-.7-.5-1.1 0-.9.7-1.6 1.6-1.6h1.4c2.2 0 3.8-1.7 3.8-3.9C19.3 6.3 16 3 12 3z"/><circle cx="7.5" cy="11.5" r="1.1" fill="currentColor" stroke="none"/><circle cx="9.5" cy="7.5" r="1.1" fill="currentColor" stroke="none"/><circle cx="13.5" cy="7" r="1.1" fill="currentColor" stroke="none"/><circle cx="16.5" cy="10" r="1.1" fill="currentColor" stroke="none"/>',
+  folder: '<path d="M3 6.5c0-.8.7-1.5 1.5-1.5h4.2l1.8 1.8H19.5c.8 0 1.5.7 1.5 1.5v8.7c0 .8-.7 1.5-1.5 1.5H4.5C3.7 18.5 3 17.8 3 17z"/>',
 };

@@ -54,7 +54,8 @@ const _settings = {
         "--divider-margin": "6px",
         "--triangle-size": "16px",
         "--sub-font-size": "15px"
-    }
+    },
+    "window_position": "top"
 }
 
 var settings = JSON.parse(JSON.stringify(_settings))

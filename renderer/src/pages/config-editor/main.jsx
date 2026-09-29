@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { Button, Input } from '@fluentui/react-components';
 import { AppTheme } from '../../common/theme.jsx';
+import { useThemePack } from '../../common/themePack.js';
 import TitleBar from '../../common/TitleBar.jsx';
 import { ipcRenderer } from '../../common/electron.js';
 import { Svg, ICONS } from '../../common/icons.jsx';
@@ -43,6 +44,20 @@ function ConfigEditorApp() {
   const [invalidIndexes, setInvalidIndexes] = useState(() => new Set());
   // 时间表“新增/重命名”页内弹窗：{ mode: 'add' | 'rename', oldName, value, error }
   const [nameModal, setNameModal] = useState(null);
+  // “导入”来源选择弹窗
+  const [importModalOpen, setImportModalOpen] = useState(false);
+  // 保存按钮的临时状态提示：保存成功后按钮文字短暂变为“已保存”，不弹窗、不退出编辑器
+  const [saveState, setSaveState] = useState('idle'); // 'idle' | 'saving' | 'saved'
+  const saveStateTimerRef = useRef(null);
+  // 左侧导航折叠状态持久化
+  const [navCollapsed, setNavCollapsed] = useState(() => localStorage.getItem('configEditorNavCollapsed') === '1');
+  const toggleNav = useCallback(() => {
+    setNavCollapsed((prev) => {
+      const next = !prev;
+      localStorage.setItem('configEditorNavCollapsed', next ? '1' : '0');
+      return next;
+    });
+  }, []);
   const modalInputRef = useRef(null);
 
   const groupNames = useMemo(
@@ -332,10 +347,13 @@ function ConfigEditorApp() {
         throw new Error('daily_class is empty');
       }
 
-      // 分割线
+      // 分割线：以 timetable 中的所有时间表为准逐个生成。
+      // 新增的时间表默认空数组；已删除时间表的陈旧 divider 配置随之清除，
+      // 避免配置文件中残留无效时间表的分割线。
       const dividerResult = {};
       const sourceDivider = configRef.current.divider || {};
-      Object.keys(sourceDivider).forEach((name) => {
+      const timetableNames = Object.keys(configRef.current.timetable || {});
+      timetableNames.forEach((name) => {
         const raw = Object.prototype.hasOwnProperty.call(dividerTexts, name)
           ? dividerTexts[name]
           : (sourceDivider[name] || []).join(', ');
@@ -347,14 +365,18 @@ function ConfigEditorApp() {
       });
       nextConfig.divider = dividerResult;
 
+      setSaveState('saving');
       ipcRenderer.invoke('save-config-file', nextConfig)
         .then(() => {
           configRef.current = nextConfig;
-          alert('配置已保存到 scheduleConfig.js');
-          ipcRenderer.send('window-control', 'close');
+          // 不弹窗、不退出：按钮文字临时变为“已保存”，1.6 秒后恢复
+          setSaveState('saved');
+          clearTimeout(saveStateTimerRef.current);
+          saveStateTimerRef.current = setTimeout(() => setSaveState('idle'), 1600);
         })
         .catch((error) => {
           console.error(error);
+          setSaveState('idle');
           alert('保存失败，请检查配置格式');
         });
     } catch (error) {
@@ -373,45 +395,72 @@ function ConfigEditorApp() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // 弹窗打开时自动聚焦并全选名称
+  // 弹窗打开时自动聚焦并全选名称。
+  // 注意：只能在“打开瞬间”执行一次——nameModal 在每次按键时都会产生新对象，
+  // 若每次都 select() 全选文本，英文输入时下一个按键会替换掉刚输入的全部内容，
+  // 最终只剩最后一个字母（中文输入法在组词期间不受 select 影响，故此前未暴露）。
+  const nameModalOpenRef = useRef(false);
   useEffect(() => {
-    if (nameModal && modalInputRef.current) {
-      modalInputRef.current.focus();
-      modalInputRef.current.select();
+    if (nameModal) {
+      if (!nameModalOpenRef.current && modalInputRef.current) {
+        modalInputRef.current.focus();
+        modalInputRef.current.select();
+      }
+      nameModalOpenRef.current = true;
+    } else {
+      nameModalOpenRef.current = false;
     }
   }, [nameModal]);
 
   return (
     <>
       <TitleBar title="课表配置编辑器" />
-      <div className="app ce-app">
-        <div className="toolbar-sticky">
-          <Button onClick={reloadConfig}>刷新配置</Button>
-          <Button onClick={importConfig}>导入配置</Button>
-          <Button onClick={importFromCses}>从 CSES 导入</Button>
-          <Button onClick={exportToCses}>导出为 CSES</Button>
-          <Button className="win-primary" appearance="primary" onClick={saveConfig}>保存到 scheduleConfig.js</Button>
-        </div>
+      <div className={`app ce-app app-shell${navCollapsed ? ' nav-collapsed' : ''}`}>
+        <aside className="nav-sidebar">
+          <div className="nav-rail-top">
+            <button
+              type="button"
+              className="nav-toggle"
+              title={navCollapsed ? '展开菜单' : '折叠菜单'}
+              aria-label={navCollapsed ? '展开菜单' : '折叠菜单'}
+              onClick={toggleNav}
+            >
+              <Svg size={18} viewBox="0 0 20 20" html={ICONS.menu} strokeWidth={1.6} />
+            </button>
+            <span className="nav-rail-brand">配置</span>
+          </div>
+          <nav className="nav-list">
+            {NAV_ITEMS.map((item) => (
+              <button
+                type="button"
+                key={item.page}
+                className={`nav-item${activePage === item.page ? ' active' : ''}`}
+                title={item.label}
+                onClick={() => setActivePage(item.page)}
+              >
+                <Svg size={18} viewBox="0 0 20 20" html={item.icon} />
+                <span className="nav-label">{item.label}</span>
+              </button>
+            ))}
+          </nav>
+        </aside>
 
-        <div className="settings-app ce-settings-app">
-          <aside className="nav-sidebar">
-            <div className="nav-brand">配置</div>
-            <nav className="nav-list">
-              {NAV_ITEMS.map((item) => (
-                <button
-                  type="button"
-                  key={item.page}
-                  className={`nav-item${activePage === item.page ? ' active' : ''}`}
-                  onClick={() => setActivePage(item.page)}
-                >
-                  <Svg size={18} viewBox="0 0 20 20" html={item.icon} />
-                  <span>{item.label}</span>
-                </button>
-              ))}
-            </nav>
-          </aside>
-
-          <main className="main-content">
+        <div className="shell-body">
+          <div className="toolbar-sticky">
+            <Button onClick={reloadConfig}>刷新配置</Button>
+            <Button onClick={() => setImportModalOpen(true)}>导入</Button>
+            <Button onClick={exportToCses}>导出为 CSES</Button>
+            <Button
+              className="win-primary"
+              appearance="primary"
+              disabled={saveState === 'saving'}
+              onClick={saveConfig}
+            >
+              {saveState === 'saved' ? '已保存' : saveState === 'saving' ? '保存中…' : '保存到 scheduleConfig.js'}
+            </Button>
+          </div>
+          <div className="shell-scroll">
+            <main className="main-content">
             <div className={`ce-page${activePage === 'subject' ? ' active' : ''}`}>
               <SubjectPage rows={subjectRows} onChange={setSubjectRows} />
             </div>
@@ -450,9 +499,43 @@ function ConfigEditorApp() {
                 onChangeText={(name, text) => setDividerTexts((prev) => ({ ...prev, [name]: text }))}
               />
             </div>
-          </main>
+            </main>
+          </div>
         </div>
       </div>
+
+      {importModalOpen && (
+        <div
+          className="ce-modal-overlay"
+          onMouseDown={(event) => { if (event.target === event.currentTarget) setImportModalOpen(false); }}
+        >
+          <div className="ce-modal-dialog import-dialog" role="dialog" aria-modal="true">
+            <h3 className="ce-modal-title">导入</h3>
+            <p className="field-help">请选择导入来源。</p>
+            <div className="import-options">
+              <button
+                type="button"
+                className="import-option"
+                onClick={() => { setImportModalOpen(false); importConfig(); }}
+              >
+                <strong>从 Class Schedule 导入</strong>
+                <span>导入其他 Class Schedule 实例的 scheduleConfig.js 课表配置文件。</span>
+              </button>
+              <button
+                type="button"
+                className="import-option"
+                onClick={() => { setImportModalOpen(false); importFromCses(); }}
+              >
+                <strong>从 CSES 导入</strong>
+                <span>导入 CSES 通用课表交换文件（YAML / JSON，ClassIsland、奶酪课程表等支持）。</span>
+              </button>
+            </div>
+            <div className="ce-modal-actions">
+              <Button onClick={() => setImportModalOpen(false)}>取消</Button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {nameModal && (
         <div
@@ -495,8 +578,13 @@ function ConfigEditorApp() {
   );
 }
 
-createRoot(document.getElementById('root')).render(
-  <AppTheme>
-    <ConfigEditorApp />
-  </AppTheme>,
-);
+function ConfigEditorRoot() {
+  useThemePack();
+  return (
+    <AppTheme>
+      <ConfigEditorApp />
+    </AppTheme>
+  );
+}
+
+createRoot(document.getElementById('root')).render(<ConfigEditorRoot />);

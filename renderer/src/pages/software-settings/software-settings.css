@@ -1,20 +1,6 @@
 /* ===== 软件设置专属布局 ===== */
-
-.ss-app {
-  max-width: 1180px;
-}
-
-#root .ss-app > .toolbar-sticky {
-  position: static;
-  padding: 0;
-  margin: 0 0 16px;
-  background: transparent;
-}
-
-#root .ss-app .main-content {
-  padding: 4px 0 22px 24px;
-  overflow: auto;
-}
+/* 骨架（固定侧栏 + 独立滚动区）由 chrome.css 的 .app-shell 提供，
+   这里只保留页面内细节，不再限制整体宽度/重排工具栏。 */
 
 /* 旧版软件设置：选中导航项的文字与图标均为品牌色 */
 #root .ss-app .nav-item.active,
@@ -352,9 +338,97 @@ input.native-color {
 }
 
 @media (max-width: 640px) {
-  .ss-app { padding: 20px 14px 24px; }
   .ss-app .panel { padding: 18px; }
   .settings-grid { grid-template-columns: 1fr; }
-  .ss-app .nav-sidebar { width: 145px; }
-  #root .ss-app .main-content { padding: 4px 0 14px 14px; }
+}
+
+/* ===== 底部状态条（替代原工具栏的刷新/保存按钮位置） ===== */
+.shell-status {
+  flex-shrink: 0;
+  min-height: 30px;
+  padding: 5px 28px 7px;
+  border-top: 1px solid var(--colorNeutralStroke2);
+  color: var(--colorNeutralForeground3);
+  font-size: 12px;
+  line-height: 18px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ===== 外观页：数字输入框 + px 后缀 ===== */
+.unit-field {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.unit-field .fui-Input {
+  flex: 1;
+  min-width: 0;
+}
+
+.unit-suffix {
+  flex-shrink: 0;
+  color: var(--colorNeutralForeground3);
+  font-size: 13px;
+}
+
+/* ===== 主题页：主题包开关列表 ===== */
+.theme-packs-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.theme-packs-toolbar h3 {
+  margin: 0;
+}
+
+.theme-packs-empty {
+  padding: 18px 16px;
+  line-height: 1.7;
+}
+
+.theme-pack-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.theme-pack-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 12px 16px;
+  border: 1px solid var(--colorNeutralStroke2);
+  border-radius: 8px;
+  background: var(--colorNeutralBackground2);
+  cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.theme-pack-card:hover {
+  border-color: var(--colorCompoundBrandStroke);
+  background: var(--colorNeutralBackground2Hover);
+}
+
+.theme-pack-card.active {
+  border-color: var(--colorCompoundBrandStroke);
+  box-shadow: 0 0 0 1px var(--colorCompoundBrandStroke) inset;
+}
+
+.theme-pack-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--colorNeutralForeground1);
+}
+
+.theme-pack-meta {
+  margin-top: 3px;
+  font-size: 12px;
+  color: var(--colorNeutralForeground3);
 }

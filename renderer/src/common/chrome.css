@@ -202,25 +202,11 @@ tbody tr:last-child td {
 }
 
 /* ----- 左侧导航（Win11 设置风格） ----- */
-.settings-app {
-  display: flex;
-  min-height: calc(100vh - 40px - 86px);
-  background: transparent;
-}
-
 .nav-sidebar {
   width: 248px;
   background: transparent;
   flex-shrink: 0;
   padding: 4px 8px 12px 0;
-}
-
-.nav-brand {
-  padding: 10px 12px 14px;
-  font-size: 16px;
-  font-weight: 600;
-  color: var(--text);
-  letter-spacing: 0.2px;
 }
 
 .nav-list {
@@ -403,4 +389,160 @@ html.acrylic .window-titlebar {
 html.acrylic .toolbar-sticky {
   background: transparent;
   backdrop-filter: blur(30px);
+}
+
+/* ===== 带固定侧栏的应用骨架（软件设置 / 课表配置编辑器） =====
+   结构：标题栏(固定) + 左侧导航栏(独立一栏，不随内容滚动，可折叠为图标轨)
+   + 右侧(顶部按钮栏固定 + 内容区独立滚动)。
+   整块 fixed 于标题栏之下，窗口自身不滚动，只有 .shell-scroll 产生滚动条，
+   因此下滑时导航与按钮始终可见可点。 */
+.app-shell {
+  position: fixed;
+  top: 40px;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  display: flex;
+  margin: 0;
+  padding: 0;
+  max-width: none;
+  z-index: 1;
+}
+
+.app-shell .nav-sidebar {
+  width: 236px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px 8px 12px;
+  border-right: 1px solid var(--divider);
+  background: var(--panel-alt);
+  overflow-y: auto;
+  overflow-x: hidden;
+  transition: width 0.18s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* 亚克力窗口整体透明，导航栏不再加实底，仅靠右缘分隔线区分两栏 */
+html.acrylic .app-shell .nav-sidebar {
+  background: transparent;
+}
+
+.app-shell.nav-collapsed .nav-sidebar {
+  width: 50px;
+}
+
+.nav-rail-top {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 40px;
+  padding: 0 2px 4px;
+  flex-shrink: 0;
+}
+
+.nav-toggle {
+  width: 34px;
+  min-width: 34px;
+  height: 34px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  box-shadow: none;
+  cursor: pointer;
+}
+
+.nav-toggle:hover {
+  background: var(--nav-hover);
+}
+
+.nav-toggle svg {
+  width: 18px;
+  height: 18px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+}
+
+.nav-rail-brand {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.app-shell.nav-collapsed .nav-rail-brand {
+  display: none;
+}
+
+.app-shell .nav-list {
+  flex: 1;
+  gap: 2px;
+  overflow-y: auto;
+}
+
+.nav-label {
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.app-shell.nav-collapsed .nav-item {
+  justify-content: center;
+  gap: 0;
+  padding: 9px 0;
+}
+
+.app-shell.nav-collapsed .nav-label {
+  display: none;
+}
+
+.shell-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* 顶部按钮栏位于滚动区之外，始终固定在内容上方 */
+.app-shell .toolbar-sticky {
+  position: static;
+  flex-shrink: 0;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 10px 24px;
+  margin: 0;
+  background: transparent;
+  border-bottom: 1px solid var(--divider);
+}
+
+html.acrylic .app-shell .toolbar-sticky {
+  backdrop-filter: none;
+}
+
+.shell-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 16px 28px 32px;
+}
+
+.app-shell .main-content {
+  padding: 0;
+  overflow: visible;
+}
+
+@media (max-width: 720px) {
+  .app-shell .nav-sidebar { width: 200px; }
+  .app-shell.nav-collapsed .nav-sidebar { width: 50px; }
+  .shell-scroll { padding: 12px 16px 24px; }
+  .app-shell .toolbar-sticky { padding: 10px 16px; }
 }

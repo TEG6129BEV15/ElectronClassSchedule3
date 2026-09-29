@@ -1,0 +1,10 @@
+/*
+ * 示例主题：仅用于演示 Theme 文件夹的主题包格式。
+ * 在 index.json 中列出的 css 文件都会被注入到所有窗口（含主界面课表条）。
+ * 想恢复默认外观：在“软件设置 - 主题”页关闭该主题开关即可。
+ */
+:root {
+    --global-border-radius: 16px;
+    --container-space: 14px;
+    --global-bg-opacity: 0.6;
+}

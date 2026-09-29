@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { Button, Checkbox } from '@fluentui/react-components';
 import { AppTheme } from '../../common/theme.jsx';
+import { useThemePack } from '../../common/themePack.js';
 import TitleBar from '../../common/TitleBar.jsx';
 import { ipcRenderer } from '../../common/electron.js';
 import { query } from '../../common/query.js';
@@ -170,8 +171,13 @@ function CourseFusionApp() {
   );
 }
 
-createRoot(document.getElementById('root')).render(
-  <AppTheme>
-    <CourseFusionApp />
-  </AppTheme>,
-);
+function CourseFusionRoot() {
+  useThemePack();
+  return (
+    <AppTheme>
+      <CourseFusionApp />
+    </AppTheme>
+  );
+}
+
+createRoot(document.getElementById('root')).render(<CourseFusionRoot />);
