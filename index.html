@@ -27,6 +27,7 @@
             <div class="countdowner" id="countdowner">
               <div class="currentClass" id="currentFullName">Loading</div>
               <div class="countdown" id="countdownText">00:00</div>
+              <div class="countdownProgress"><i></i></div>
             </div>
           </div>
         </div>
@@ -89,7 +90,7 @@
     let legacyIndex = 0;
     const rows = configured.map(row => Array.isArray(row) ? row.map(component => {
       if (typeof component === 'string') return { id: `${component}-${++legacyIndex}`, type: component, options: {} };
-      return component && ['schedule', 'week', 'date', 'countdown', 'time', 'customText'].includes(component.type)
+      return component && ['schedule', 'week', 'date', 'countdown', 'time', 'weather', 'customText'].includes(component.type)
         ? { id: component.id || `${component.type}-${++legacyIndex}`, type: component.type, options: component.options || {} } : null;
     }).filter(Boolean) : []).filter(row => row.length);
     return rows.length ? rows : [[{ id: 'schedule-1', type: 'schedule', options: {} }]];
@@ -110,14 +111,16 @@
                 <div class="countdowner" id="countdowner">
                   <div class="currentClass" id="currentFullName">Loading</div>
                   <div class="countdown" id="countdownText">00:00</div>
+                  <div class="countdownProgress"><i></i></div>
                 </div>
               </div>
             </div>`;
           if (component.type === 'week') return `<div class="leftSidebar sidebar background" data-component-slot="week" data-component-id="${component.id}"><span class="weekEN t">Load</span><div class="corner options notIgnoreClick weekCH">ing</div></div>`;
           if (component.type === 'date') return `<div class="leftSidebar sidebar background" data-component-slot="date" data-component-id="${component.id}"><span class="dateValue t">00/00</span><div class="corner options notIgnoreClick dateWeek">周一</div></div>`;
           if (component.type === 'time') return `<div class="timeSidebar sidebar background" data-component-slot="time" data-component-id="${component.id}"><span class="currentTime t">00:00:00</span></div>`;
+          if (component.type === 'weather') return `<div class="weatherSidebar sidebar background" data-component-slot="weather" data-component-id="${component.id}"><span class="weatherLine t"><span class="weatherEmoji">🌡️</span><span class="weatherTemp">--°</span></span><div class="corner weatherCity">天气</div></div>`;
           if (component.type === 'customText') return `<div class="customText background" data-component-slot="customText" data-component-id="${component.id}"></div>`;
-          return `<div class="rightSidebar sidebar background" data-component-slot="countdown" data-component-id="${component.id}"><span class="countdownDays t">000</span><div class="corner">天</div></div>`;
+          return `<div class="rightSidebar sidebar background" data-component-slot="countdown" data-component-id="${component.id}"><span class="countdownDays t">000</span><div class="corner">天</div><div class="dateProgress"><i></i></div></div>`;
         }).join('')}
       </div>
     `).join('');
@@ -156,7 +159,7 @@
       const isFusionStart = fusion && i === fusion.start;
       const isInsideFusion = fusion && i >= fusion.start && i <= fusion.end;
       if (isBreakPosition) {
-        classHtml += `<div class="class breakClassExpanded stateTransition" id="highlighted"><span class="expandedClassName"></span><span class="inlineCountdown">${scheduleData.currentHighlight.countdownText}</span></div>`;
+        classHtml += `<div class="class breakClassExpanded stateTransition" id="highlighted"><span class="expandedClassName"></span><span class="inlineCountdown">${scheduleData.currentHighlight.countdownText}</span><span class="inlineProgress"><i></i></span></div>`;
       }
       if (!isBreakPosition && scheduleData.divider.indexOf(i) != -1)
         classHtml += '<div class="divider"></div>'
@@ -188,7 +191,7 @@
       else if (highlightedIndex == i && !scheduleData.currentHighlight.isBreak) {
         if (scheduleData.currentHighlight.type === 'current') {
           if (showInlineCountdown)
-            classHtml += `<div class="class current currentClassExpanded stateTransition" id="highlighted"><span class="expandedClassName"></span><span class="inlineCountdown">${scheduleData.currentHighlight.countdownText}</span></div>`
+            classHtml += `<div class="class current currentClassExpanded stateTransition" id="highlighted"><span class="expandedClassName"></span><span class="inlineCountdown">${scheduleData.currentHighlight.countdownText}</span><span class="inlineProgress"><i></i></span></div>`
           else
             classHtml += `<div class="class current" id="highlighted">${inner}</div>`
         }
@@ -199,13 +202,13 @@
       }
       else {
         if (scheduleData.currentHighlight.index > i)
-          classHtml += `<div class="class" style="color:rgba(188,188,188);">${inner}</div>`
+          classHtml += `<div class="class ended">${inner}</div>`
         else
           classHtml += `<div class="class">${inner}</div>`
       }
     }
     if (showInlineCountdown && scheduleData.currentHighlight.isBreak && scheduleData.currentHighlight.index === scheduleData.scheduleArray.length) {
-      classHtml += `<div class="class breakClassExpanded stateTransition" id="highlighted"><span class="expandedClassName"></span><span class="inlineCountdown">${scheduleData.currentHighlight.countdownText}</span></div>`;
+      classHtml += `<div class="class breakClassExpanded stateTransition" id="highlighted"><span class="expandedClassName"></span><span class="inlineCountdown">${scheduleData.currentHighlight.countdownText}</span><span class="inlineProgress"><i></i></span></div>`;
     }
     document.querySelectorAll('.scheduleComponent .classContainer').forEach((element) => {
       element.innerHTML = classHtml;
@@ -323,6 +326,45 @@
     tick(true)
   }
 
+  // ===== 倒计时进度条：随当前时间段（上课/课间）每秒推进 =====
+  function updateCountdownProgress() {
+    const highlight = scheduleData.currentHighlight;
+    const has = typeof highlight.progress === 'number';
+    const pct = has ? Math.round(highlight.progress * 1000) / 10 : 0;
+    const color = highlight.type === 'current' ? 'var(--col-current)' : 'var(--col-break)';
+    // 将 classContainer 的水平 padding 写入 CSS 变量，供竖排进度条负边距使用
+    const cc = document.querySelector('.scheduleComponent .classContainer');
+    if (cc) {
+      const style = getComputedStyle(cc);
+      root.style.setProperty('--cc-padding-x', style.paddingLeft);
+    }
+    const instances = getComponentLayout().flat();
+    document.querySelectorAll('.scheduleComponent').forEach((sc) => {
+      const instance = instances.find((component) => component.id === sc.dataset.componentId);
+      const enabled = instance ? instance.options.showProgress !== false : true;
+      const visible = enabled && has;
+      sc.querySelectorAll('.countdownProgress, .inlineProgress').forEach((bar) => {
+        bar.style.display = visible ? '' : 'none';
+        const fill = bar.querySelector('i');
+        if (fill) {
+          fill.style.width = pct + '%';
+          fill.style.background = color;
+        }
+      });
+    });
+    // “上课隐藏”时的顶部小窗：跟随第一个课表组件实例的开关
+    const anyEnabled = instances.some((component) => component.type === 'schedule' && component.options.showProgress !== false);
+    const miniBar = miniCountdown.querySelector('.miniProgress');
+    if (miniBar) {
+      miniBar.style.display = anyEnabled && has ? '' : 'none';
+      const fill = miniBar.querySelector('i');
+      if (fill) {
+        fill.style.width = pct + '%';
+        fill.style.background = color;
+      }
+    }
+  }
+
   function setCountdownerContent() {
     if (!currentFullName || !countdownText || !countdownContainer || !miniCountdown) return;
     if (scheduleData.currentHighlight.isNextDay) {
@@ -353,7 +395,7 @@
         if (isClassHidden) { // 上课隐藏 -> 显示顶部小窗口（与布局模式无关）
           popupVisible = false;
           miniCountdown.style.display = 'block'
-          miniCountdown.innerHTML = `<div class="currentClass">${currentFullName.innerText = scheduleData.currentHighlight.fullName}</div><div class="countdown" style="margin-left:5px">${scheduleData.currentHighlight.countdownText}</div>`
+          miniCountdown.innerHTML = `<div class="currentClass">${currentFullName.innerText = scheduleData.currentHighlight.fullName}</div><div class="countdown" style="margin-left:5px">${scheduleData.currentHighlight.countdownText}</div><div class="miniProgress"><i></i></div>`
         } else if (isRightLayout || hasComponentBelowSchedule()) {
           // 倒计时已内联在高亮格子中（right 模式始终内联），不重复显示倒计时框
           popupVisible = false;
@@ -421,6 +463,49 @@
     countdownContainer.style.top = offset.y + 'px'
   }
 
+  // ===== 天气组件：主进程代理请求，10 分钟刷新一次 =====
+  const weatherDataMap = new Map(); // componentId -> {city,temp,text,emoji} | {error:true}
+
+  function renderWeatherComponents() {
+    getComponentLayout().flat().filter((component) => component.type === 'weather').forEach((component) => {
+      const element = document.querySelector(`[data-component-id="${component.id}"]`);
+      if (!element) return;
+      const data = weatherDataMap.get(component.id);
+      const emojiEl = element.querySelector('.weatherEmoji');
+      const tempEl = element.querySelector('.weatherTemp');
+      const cityEl = element.querySelector('.weatherCity');
+      if (data && !data.error) {
+        if (emojiEl) emojiEl.innerText = data.emoji || '🌡️';
+        if (tempEl) tempEl.innerText = data.temp === null ? '--°' : `${data.temp}°`;
+        if (cityEl) cityEl.innerText = data.text ? `${data.city || ''} ${data.text}`.trim() : (data.city || '天气');
+      } else if (data && data.error) {
+        if (emojiEl) emojiEl.innerText = '🌡️';
+        if (tempEl) tempEl.innerText = '--°';
+        if (cityEl) cityEl.innerText = '天气不可用';
+      }
+    });
+  }
+
+  let weatherRetryTimer = null;
+  async function refreshWeather() {
+    const instances = getComponentLayout().flat().filter((component) => component.type === 'weather');
+    let hasError = false;
+    await Promise.all(instances.map(async (component) => {
+      try {
+        const data = await ipcRenderer.invoke('get-weather', component.options.city || '');
+        if (data && data.error) hasError = true;
+        weatherDataMap.set(component.id, data);
+      } catch (error) {
+        hasError = true;
+        weatherDataMap.set(component.id, { error: true });
+      }
+    }));
+    renderWeatherComponents();
+    // 启动时网络未就绪/接口偶发失败：1 分钟后快速重试，不必干等 10 分钟轮询
+    clearTimeout(weatherRetryTimer);
+    if (hasError) weatherRetryTimer = setTimeout(refreshWeather, 60 * 1000);
+  }
+
   function setSidebar() {
     const editedDate = getCurrentEditedDate()
     const instances = getComponentLayout().flat();
@@ -450,6 +535,8 @@
       const element = document.querySelector(`[data-component-id="${component.id}"]`);
       if (element) element.textContent = component.options.text ?? '';
     });
+    // 天气内容本身由 refreshWeather 定时拉取，这里只负责布局重建后回填
+    renderWeatherComponents();
     instances.filter((component) => component.type === 'countdown').forEach((component) => {
       const element = document.querySelector(`[data-component-id="${component.id}"]`);
       if (!element) return;
@@ -460,6 +547,24 @@
       if (days) {
         days.innerText = value;
         days.style.color = component.options.color || '';
+      }
+      // 可选进度条：起止日期均为用户自定义日期，按整天计算 0~1
+      const bar = element.querySelector('.dateProgress');
+      if (bar) {
+        const startDate = component.options.start ? new Date(component.options.start) : null;
+        const endDate = target && target !== 'hidden' ? new Date(target) : null;
+        const valid = startDate && endDate && !Number.isNaN(startDate) && !Number.isNaN(endDate) && endDate > startDate;
+        const show = component.options.showProgress === true && valid;
+        bar.style.display = show ? '' : 'none';
+        if (show) {
+          const noon = (date) => new Date(date.getFullYear(), date.getMonth(), date.getDate(), 12);
+          const progress = Math.min(1, Math.max(0,
+            (noon(editedDate) - noon(startDate)) / (noon(endDate) - noon(startDate))));
+          const fill = bar.querySelector('i');
+          fill.style.width = `${Math.round(progress * 1000) / 10}%`;
+          // 进度条颜色跟随倒计日期数字颜色
+          fill.style.background = component.options.color || '';
+        }
       }
     });
   }
@@ -477,6 +582,7 @@
       setCountdownerPosition()
       setBackgroundDisplay()
     }
+    updateCountdownProgress()
     lastScheduleData = $.extend(true, {}, scheduleData)
     checkReminders(scheduleData)
   }
@@ -522,12 +628,15 @@
     applyPositionMode()
     scheduleData = getScheduleData();
     tick(true)
+    refreshWeather()
   }).catch(() => {
     applyScheduleCss()
     applyTheme()
     applyPositionMode()
     tick(true)
+    refreshWeather()
   })
+  setInterval(refreshWeather, 10 * 60 * 1000);
   setInterval(() => {
     if (new Date().getTime() - lastTickTime >= 1000) {
       lastTickTime = new Date().getTime()
@@ -592,6 +701,14 @@
   ipcRenderer.on('cursor-position', (e, pos) => {
     if (!pos || !pos.inside) { scheduleRestore(); return }
     handleCursorAt(pos.x, pos.y)
+    // 全屏光效窗（透明、screen-saver 层级）显示在主窗口上方时，系统转发的
+    // mousemove 会被上层透明窗阻断，主窗口收不到事件就无法把遮罩区域切回
+    // 可点击态。遮罩显示期间改用主进程轮询坐标做命中兜底。
+    if (reminderMask.classList.contains('active')) {
+      const el = document.elementFromPoint(pos.x, pos.y)
+      const interactive = !!(el && el.closest && el.closest('.notIgnoreClick'))
+      ipcRenderer.send('setIgnore', !interactive)
+    }
   })
 
   // 补充通道：forward 若能转发 pointer/wheel 事件（部分设备/驱动），
@@ -992,8 +1109,36 @@
   })
 
   // ===== 上下课 / 自定义提醒检测 =====
+  // 开启/重启/保存设置或课表配置都会整页 reload，内存状态丢失会导致：
+  //   · 正在上课时 type 从 null 突变 current → 重发“上课”提醒
+  //   · 处于课前倒计时区间 → 重发“即将上课”提醒
+  //   · 当前分钟内 → 重发自定义提醒
+  // 因此跨 reload 的“已提醒”记录落在 localStorage（按天分键，自然过期）。
   let lastReminderState = { classIndex: null, type: null, fired: {} };
   let firedCustomDate = {};
+
+  const FIRED_STORE_KEY = () => `reminder-fired:${getTodayKey()}`;
+  function loadFiredStore() {
+    try {
+      const raw = localStorage.getItem(FIRED_STORE_KEY());
+      if (!raw) return { class: {}, custom: {} };
+      const o = JSON.parse(raw);
+      return { class: (o && o.class) || {}, custom: (o && o.custom) || {} };
+    } catch { return { class: {}, custom: {} }; }
+  }
+  function saveFiredStore(classKey, customId) {
+    try {
+      const o = loadFiredStore();
+      if (classKey) o.class[classKey] = true;
+      if (customId) o.custom[customId] = true;
+      localStorage.setItem(FIRED_STORE_KEY(), JSON.stringify(o));
+    } catch { /* 存储不可用时退化为仅内存去重 */ }
+  }
+  function hasFired(classKey, customId) {
+    const o = loadFiredStore();
+    if (classKey) return !!(o.class[classKey] || lastReminderState.fired[classKey]);
+    return !!(o.custom[customId] || firedCustomDate[customId] === getTodayKey());
+  }
 
   function getTodayKey() {
     const d = getCurrentEditedDate();
@@ -1001,6 +1146,8 @@
   }
 
   function checkReminders(sd) {
+    // 总开关：关闭后任何提醒提供方都不触发
+    if (settings?.reminder_enabled === false) return;
     const rc = settings?.reminder_class || {};
     const hl = sd.currentHighlight;
     if (!hl) return;
@@ -1012,27 +1159,30 @@
       const cd = hl.countdown;
       const secs = Number(rc.upcoming_seconds) || 300;
       const key = sessionKey('upcoming', hl.index);
-      if (cd !== null && cd > 0 && cd <= secs && !lastReminderState.fired[key]) {
+      if (cd !== null && cd > 0 && cd <= secs && !hasFired(key)) {
         lastReminderState.fired[key] = true;
-        triggerReminderMask({ text: rc.upcoming_text || '即将上课', color: 'rgba(0,200,0,0.85)', duration: 5000 });
+        saveFiredStore(key);
+        fireReminder({ text: rc.upcoming_text || '即将上课', color: 'rgba(0,200,0,0.85)', duration: 5000 });
       }
     }
 
     // 上课：从非 current 变为 current
     if (rc.start_enabled && hl.type === 'current' && hl.index !== null) {
       const key = sessionKey('start', hl.index);
-      if (lastReminderState.type !== 'current' && !lastReminderState.fired[key]) {
+      if (lastReminderState.type !== 'current' && !hasFired(key)) {
         lastReminderState.fired[key] = true;
-        triggerReminderMask({ text: rc.start_text || '上课', color: 'rgba(0,200,0,0.85)', duration: 5000 });
+        saveFiredStore(key);
+        fireReminder({ text: rc.start_text || '上课', color: 'rgba(0,200,0,0.85)', duration: 5000 });
       }
     }
 
     // 下课：从 current 变为非 current
     if (rc.end_enabled && lastReminderState.type === 'current' && hl.type !== 'current' && lastReminderState.classIndex !== null) {
       const key = sessionKey('end', lastReminderState.classIndex);
-      if (!lastReminderState.fired[key]) {
+      if (!hasFired(key)) {
         lastReminderState.fired[key] = true;
-        triggerReminderMask({ text: rc.end_text || '下课', color: 'rgba(200,180,0,0.85)', duration: 5000 });
+        saveFiredStore(key);
+        fireReminder({ text: rc.end_text || '下课', color: 'rgba(200,180,0,0.85)', duration: 5000 });
       }
     }
 
@@ -1040,70 +1190,275 @@
     lastReminderState.type = hl.type;
 
     // 自定义文本提醒
+    const nowMin = getCurrentTime().slice(0, 5);
+    const today = getTodayKey();
     const customs = settings?.reminder_custom || [];
     if (Array.isArray(customs) && customs.length) {
       // getCurrentTime() 返回 HH:MM:SS，提醒时间是 HH:MM，取前 5 位按分钟比较
-      const nowMin = getCurrentTime().slice(0, 5);
-      const today = getTodayKey();
       customs.forEach((item) => {
         if (!item || !item.time) return;
         const t = String(item.time).trim().slice(0, 5);
         if (!/^\d{2}:\d{2}$/.test(t)) return;
         const id = item.id || item.time;
-        if (firedCustomDate[id] === today) return;
+        if (hasFired(null, id)) return;
         if (nowMin === t) {
           firedCustomDate[id] = today;
-          triggerReminderMask({ text: item.text || '提醒', color: item.color || settings?.reminder_color || '', duration: Number(item.duration) || 5000 });
+          saveFiredStore(null, id);
+          fireReminder({ text: item.text || '提醒', color: item.color || settings?.reminder_color || '', duration: Number(item.duration) || 5000 });
         }
       });
     }
+
+    checkWeatherReminder(nowMin, today);
+    checkExtremeWeather();
+    checkEarthquakes();
+  }
+
+  // ===== 天气提醒：每日固定时间播报；雨/雪/雷/雾等恶劣天气追加提示 =====
+  let firedWeatherDate = null;
+  function checkWeatherReminder(nowMin, todayKey) {
+    const rw = settings?.reminder_weather;
+    if (!rw || !rw.enabled) return;
+    const t = String(rw.time || '').trim().slice(0, 5);
+    if (!/^\d{2}:\d{2}$/.test(t) || nowMin !== t) return;
+    if (firedWeatherDate === todayKey || hasFired(null, 'weather')) return; // reload 后当天不重发
+    firedWeatherDate = todayKey;
+    saveFiredStore(null, 'weather');
+    ipcRenderer.invoke('get-weather', rw.city || '').then((data) => {
+      if (!data || data.error) return;
+      const bad = /[雨雪雷雾凇冻]/.test(data.text || '');
+      const head = `${data.city ? data.city + ' ' : ''}${data.temp === null ? '' : data.temp + '° '}${data.text || ''}`.trim();
+      fireReminder({
+        text: bad ? `${head}，注意天气变化` : head,
+        color: settings?.reminder_color || '',
+        duration: 6000
+      });
+    }).catch(() => {});
+  }
+
+  // ===== 极端天气提醒：每 10 分钟检测一次当前 WMO 天气码，
+  //       命中大雨/冻雨/大雪/强阵雨/雷暴等代码时提醒，同一种天气每天最多一次 =====
+  const EXTREME_CODES = new Set([56, 57, 65, 66, 67, 75, 82, 86, 95, 96, 99]);
+  const EXTREME_CHECK_INTERVAL = 10 * 60 * 1000;
+  let lastExtremeCheckAt = 0;
+  let extremeChecking = false;
+  function readFiredExtreme() {
+    try { return JSON.parse(localStorage.getItem('firedExtremeWeather') || '{}') || {}; }
+    catch { return {}; }
+  }
+  function checkExtremeWeather() {
+    const rw = settings?.reminder_weather;
+    if (!rw || !rw.extreme_enabled) return;
+    const now = Date.now();
+    if (extremeChecking || now - lastExtremeCheckAt < EXTREME_CHECK_INTERVAL) return;
+    lastExtremeCheckAt = now;
+    extremeChecking = true;
+    ipcRenderer.invoke('get-weather', rw.city || '').then((data) => {
+      if (!data || data.error || data.code === null || data.code === undefined) return;
+      const code = Number(data.code);
+      if (!EXTREME_CODES.has(code)) return;
+      const todayKey = getTodayKey();
+      const fired = readFiredExtreme();
+      if (fired.date !== todayKey) { fired.date = todayKey; fired.codes = {}; }
+      if (fired.codes[code]) return;
+      fired.codes[code] = true;
+      try { localStorage.setItem('firedExtremeWeather', JSON.stringify(fired)); } catch { /* 忽略 */ }
+      fireReminder({
+        text: `极端天气预警：${data.city ? data.city + ' ' : ''}${data.text || '恶劣天气'}，请减少外出、注意安全`,
+        color: 'rgba(220,120,0,0.88)',
+        duration: 6000
+      });
+    }).catch(() => {}).finally(() => { extremeChecking = false; });
+  }
+
+  // ===== 地震预警：每分钟轮询中国地震台网速报，只报 4.0 级以上、近 30 分钟内
+  //       发生且此前未通知过的事件；首次拉取只播种 ID，避免开机即弹窗 =====
+  const QUAKE_CHECK_INTERVAL = 60 * 1000;
+  const QUAKE_MAG_THRESHOLD = 4.0;
+  const QUAKE_FRESH_MS = 30 * 60 * 1000;
+  let lastQuakeCheckAt = 0;
+  let quakeChecking = false;
+  let quakeSeeded = false;
+  function readFiredQuakeIds() {
+    try {
+      const arr = JSON.parse(localStorage.getItem('firedQuakeIds') || '[]');
+      return Array.isArray(arr) ? arr : [];
+    } catch { return []; }
+  }
+  function rememberQuakeId(id) {
+    try {
+      const ids = readFiredQuakeIds().filter((x) => x !== id);
+      ids.unshift(id);
+      localStorage.setItem('firedQuakeIds', JSON.stringify(ids.slice(0, 60)));
+    } catch { /* 忽略 */ }
+  }
+  function checkEarthquakes() {
+    const rw = settings?.reminder_weather;
+    if (!rw || !rw.quake_enabled) return;
+    const now = Date.now();
+    if (quakeChecking || now - lastQuakeCheckAt < QUAKE_CHECK_INTERVAL) return;
+    lastQuakeCheckAt = now;
+    quakeChecking = true;
+    ipcRenderer.invoke('get-earthquakes').then((list) => {
+      if (!list || list.error || !Array.isArray(list)) return;
+      const firedIds = readFiredQuakeIds();
+      list.forEach((ev) => {
+        if (ev.magnitude === null || ev.magnitude < QUAKE_MAG_THRESHOLD) return;
+        if (!quakeSeeded) {
+          // 首次只记录，不提醒（列表含大量历史事件）
+          if (!firedIds.includes(ev.id)) rememberQuakeId(ev.id);
+          return;
+        }
+        if (firedIds.includes(ev.id)) return;
+        rememberQuakeId(ev.id);
+        if (now - ev.epochMs > QUAKE_FRESH_MS) return; // 太旧的事件不再追报
+        const source = ev.type === 'reviewed' ? '中国地震台网正式测定' : '中国地震台网自动测定';
+        fireReminder({
+          text: `地震预警｜${source}：${ev.location}发生${ev.magnitude}级地震，震源深度${ev.depth === null ? '未知' : ev.depth + '千米'}，注意避险`,
+          color: 'rgba(220,60,40,0.9)',
+          duration: 8000
+        });
+      });
+      quakeSeeded = true;
+    }).catch(() => {}).finally(() => { quakeChecking = false; });
+  }
+
+  // ===== 统一提醒出口：音效 → 全屏窗口 / 遮罩（+临时置顶） =====
+  let reminderAudioCtx = null;
+  function playBuiltinChime() {
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    if (!Ctx) return;
+    if (!reminderAudioCtx) reminderAudioCtx = new Ctx();
+    const ctx = reminderAudioCtx;
+    if (ctx.state === 'suspended') ctx.resume();
+    const now = ctx.currentTime;
+    // 两音“叮咚”：A5 → E5，正弦波 + 快速衰减包络
+
+    [{ f: 880, t: 0 }, { f: 659.25, t: 0.28 }].forEach((n) => {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'sine';
+      osc.frequency.value = n.f;
+      gain.gain.setValueAtTime(0, now + n.t);
+      gain.gain.linearRampToValueAtTime(0.35, now + n.t + 0.03);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + n.t + 0.55);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start(now + n.t);
+      osc.stop(now + n.t + 0.6);
+    });
+  }
+
+  function playReminderSound(adv) {
+    if (adv.sound_source === 'custom' && adv.sound_file) {
+      try {
+        const { pathToFileURL } = require('url');
+        const audio = new Audio(pathToFileURL(adv.sound_file).href);
+        audio.volume = 0.9;
+        audio.play().catch(() => playBuiltinChime());
+        return;
+      } catch (error) { /* 落到内置提示音 */ }
+    }
+    playBuiltinChime();
+  }
+
+  function fireReminder(payload) {
+    const adv = settings?.reminder_advanced || {};
+    if (adv.sound_enabled) {
+      try { playReminderSound(adv); } catch (error) { /* 静音失败不影响遮罩 */ }
+    }
+    // 普通提醒：课表条上的遮罩与文字始终显示
+    triggerReminderMask(payload);
+    // 全屏提醒只是在普通提醒基础上叠加一层全屏渐隐光效（独立窗口、点击穿透）
+    if (adv.fullscreen_enabled) {
+      // 光效从提醒发出的位置（课表条中心）开始扩散
+      const glowPayload = Object.assign({}, payload);
+      const originEl = document.querySelector('.scheduleComponent');
+      if (originEl) {
+        const r = originEl.getBoundingClientRect();
+        glowPayload.originX = Math.round(r.left + r.width / 2);
+        glowPayload.originY = Math.round(r.top + r.height / 2);
+      }
+      ipcRenderer.send('reminder-fullscreen', glowPayload);
+    }
+    if (adv.ontop_enabled) ipcRenderer.send('reminder-pin', { duration: payload.duration });
   }
 
   // ===== 提醒遮罩 =====
   const reminderMask = document.getElementById('reminderMask');
   const reminderText = document.getElementById('reminderText');
   let reminderHideTimer = null;
+  let reminderSyncRaf = 0;
+  let lastReminderGeom = '';
+
+  // 上课/下课瞬间课表条会重建（展开格切换、0.45s 入场动画），宽高和位置
+  // 都在变。只在触发瞬间测量一次会让遮罩停留在旧几何上（出现明显错位），
+  // 因此遮罩显示期间逐帧同步课表条的位置与尺寸。
+  function syncReminderMaskGeometry() {
+    const scheduleEl = document.querySelector('.scheduleComponent') || globalContainer;
+    if (!scheduleEl) return;
+    const rect = scheduleEl.getBoundingClientRect();
+    const geom = `${rect.left},${rect.top},${rect.width},${rect.height}`;
+    if (geom !== lastReminderGeom) {
+      lastReminderGeom = geom;
+      reminderMask.style.left = `${rect.left}px`;
+      reminderMask.style.top = `${rect.top}px`;
+      reminderMask.style.width = `${rect.width}px`;
+      reminderMask.style.height = `${rect.height}px`;
+      reminderMask.style.setProperty('--reminder-x', `${rect.width / 2}px`);
+      reminderMask.style.setProperty('--reminder-y', `${rect.height / 2}px`);
+      reminderMask.style.setProperty('--reminder-r', `${Math.ceil(Math.hypot(rect.width, rect.height) / 2) + 2}px`);
+    }
+    if (reminderMask.classList.contains('active')) {
+      reminderSyncRaf = requestAnimationFrame(syncReminderMaskGeometry);
+    }
+  }
 
   function triggerReminderMask(payload = {}) {
     const text = String(payload.text ?? '').trim();
     reminderText.textContent = text;
     reminderText.style.display = text ? '' : 'none';
-    const scheduleEl = document.querySelector('.scheduleComponent') || globalContainer;
-    const rect = scheduleEl.getBoundingClientRect();
-    reminderMask.style.left = `${rect.left}px`;
-    reminderMask.style.top = `${rect.top}px`;
-    reminderMask.style.width = `${rect.width}px`;
-    reminderMask.style.height = `${rect.height}px`;
-    reminderMask.style.setProperty('--reminder-x', `${rect.width / 2}px`);
-    reminderMask.style.setProperty('--reminder-y', `${rect.height / 2}px`);
-    reminderMask.style.setProperty('--reminder-r', `${Math.ceil(Math.hypot(rect.width, rect.height) / 2) + 2}px`);
+    lastReminderGeom = '';
+    syncReminderMaskGeometry();
     const color = String(payload.color || settings?.reminder_color || '').trim();
     if (color) reminderMask.style.setProperty('--reminder-bg-color', color);
     else reminderMask.style.removeProperty('--reminder-bg-color');
     clearTimeout(reminderHideTimer);
     reminderMask.classList.remove('closing');
     reminderMask.classList.add('active');
+    cancelAnimationFrame(reminderSyncRaf);
+    reminderSyncRaf = requestAnimationFrame(syncReminderMaskGeometry);
     void reminderMask.offsetWidth;
     reminderMask.classList.add('shown');
     const duration = Number(payload.duration);
     reminderHideTimer = setTimeout(hideReminderMask, Number.isFinite(duration) && duration > 0 ? duration : 5000);
   }
 
-  function hideReminderMask() {
+  function hideReminderMask(manual) {
     clearTimeout(reminderHideTimer);
     reminderHideTimer = null;
     if (!reminderMask.classList.contains('active') || reminderMask.classList.contains('closing')) return;
+    // 仅手动关闭（点击/外部隐藏）时通知光效提前淡出；到时自动关闭不打断光效，
+    // 保证光效无论提醒时长多短都完整播放 1 秒（由主进程定时隐藏）
+    if (manual) ipcRenderer.send('reminder-fullscreen-close');
     reminderMask.classList.add('closing');
     setTimeout(() => {
       reminderMask.classList.remove('active', 'shown', 'closing');
+      cancelAnimationFrame(reminderSyncRaf);
+      lastReminderGeom = '';
+      // 恢复主窗口默认的“空白穿透”态，后续由 forwarded mousemove 重新切换
+      ipcRenderer.send('setIgnore', true);
     }, 1100);
   }
 
-  reminderMask.addEventListener('click', hideReminderMask);
+  reminderMask.addEventListener('click', () => hideReminderMask(true));
 
   ipcRenderer.on('reminder-trigger', (e, payload) => {
-    if (payload && payload.action === 'hide') hideReminderMask();
-    else triggerReminderMask(payload);
+    if (payload && payload.action === 'hide') {
+      hideReminderMask(true);
+    } else {
+      fireReminder(payload);
+    }
   })
 </script>
 

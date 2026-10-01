@@ -133,6 +133,8 @@ input.native-color {
   font-size: 13px;
   cursor: grab;
   user-select: none;
+  /* 触屏行重排依赖 pointer 事件，阻止浏览器把纵向滑动当作页面滚动 */
+  touch-action: none;
 }
 
 .component-row-title:active { cursor: grabbing; }
@@ -171,6 +173,8 @@ input.native-color {
   color: var(--text);
   font-size: 13px;
   cursor: grab;
+  /* 触屏上从卡片发起拖拽时阻止滚动，pointermove 才能持续送达 */
+  touch-action: none;
 }
 
 .component-chip:active { cursor: grabbing; }
@@ -243,6 +247,7 @@ input.native-color {
   color: var(--text);
   font-family: inherit;
   cursor: grab;
+  touch-action: none;
 }
 
 .component-library-card:hover {
@@ -251,6 +256,7 @@ input.native-color {
 }
 
 .component-library-card:active { cursor: grabbing; }
+.component-library-card.dragging { opacity: 0.45; }
 
 .component-library-card .component-type-icon {
   margin-top: 2px;
@@ -432,3 +438,63 @@ input.native-color {
   font-size: 12px;
   color: var(--colorNeutralForeground3);
 }
+
+/* ===== 提醒页：总开关 / 二级菜单子页 / 禁用态 ===== */
+.reminder-master-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.reminder-master.is-off {
+  border-color: var(--colorCompoundBrandStroke);
+}
+
+.sub-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 4px 0 16px;
+  border-bottom: 1px solid var(--colorNeutralStroke2);
+  padding-bottom: 10px;
+}
+
+.sub-tab {
+  appearance: none;
+  border: 1px solid var(--colorNeutralStroke2);
+  background: var(--colorNeutralBackground2);
+  color: var(--colorNeutralForeground2);
+  border-radius: 6px;
+  padding: 6px 14px;
+  font-size: 13px;
+  line-height: 1.4;
+  cursor: pointer;
+  transition: border-color 0.15s ease, background 0.15s ease, color 0.15s ease;
+}
+
+.sub-tab:hover {
+  border-color: var(--colorCompoundBrandStroke);
+  background: var(--colorNeutralBackground2Hover);
+}
+
+.sub-tab.active {
+  border-color: var(--colorCompoundBrandStroke);
+  background: var(--colorCompoundBrandBackground);
+  color: var(--colorNeutralForegroundOnBrand);
+}
+
+.sub-page {
+  display: none;
+}
+
+.sub-page.active {
+  display: block;
+}
+
+/* 总开关关闭时，提供方与高级设置两个面板整体只读变灰 */
+.panel-disabled {
+  opacity: 0.55;
+  pointer-events: none;
+}
+

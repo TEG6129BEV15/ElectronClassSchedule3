@@ -78,6 +78,36 @@ const CSS_VAR_SPECS = [
 
 const NUMBER_RE = /^-?\d+(\.\d+)?$/;
 
+// 设置页内试听提醒音效：内置“叮咚”用 WebAudio 合成，自定义走本地音频文件
+function previewReminderSound(advanced) {
+  try {
+    if (advanced && advanced.sound_source === 'custom' && advanced.sound_file) {
+      const url = encodeURI(`file:///${String(advanced.sound_file).replace(/\\/g, '/')}`);
+      const audio = new Audio(url);
+      audio.volume = 0.9;
+      audio.play().catch(() => {});
+      return;
+    }
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    if (!Ctx) return;
+    const ctx = new Ctx();
+    const now = ctx.currentTime;
+    [{ f: 880, t: 0 }, { f: 659.25, t: 0.28 }].forEach((n) => {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'sine';
+      osc.frequency.value = n.f;
+      gain.gain.setValueAtTime(0, now + n.t);
+      gain.gain.linearRampToValueAtTime(0.35, now + n.t + 0.03);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + n.t + 0.55);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start(now + n.t);
+      osc.stop(now + n.t + 0.6);
+    });
+  } catch (error) { /* 试听失败不影响页面 */ }
+}
+
 // 文件里存的是 "8px 14px"，输入框里只显示 "8 14"
 function cssValueToDraft(spec, rawValue) {
   const text = String(rawValue ?? '').trim();
@@ -111,6 +141,12 @@ function SoftwareSettingsApp({ onThemeModeChange }) {
   const [cssStyleObj, setCssStyleObj] = useState({});
   const [reminderClass, setReminderClass] = useState({});
   const [reminderCustom, setReminderCustom] = useState([]);
+  const [reminderEnabled, setReminderEnabled] = useState(true);
+  const [reminderWeather, setReminderWeather] = useState({});
+  const [reminderAdvanced, setReminderAdvanced] = useState({});
+  // 提醒页二级菜单：提醒提供方 / 高级设置 各自独立的子页签
+  const [reminderProviderTab, setReminderProviderTab] = useState('class');
+  const [reminderAdvancedTab, setReminderAdvancedTab] = useState('sound');
   const [activeTheme, setActiveTheme] = useState('');
   const [timeOffsetText, setTimeOffsetText] = useState('0');
   // 首帧与 URL 参数（主进程读磁盘注入）保持一致，避免挂载时 effect 先把 auto
@@ -155,6 +191,10 @@ function SoftwareSettingsApp({ onThemeModeChange }) {
       setCssStyleObj(drafts);
       setReminderClass(settingsData?.reminder_class || {});
       setReminderCustom(Array.isArray(settingsData?.reminder_custom) ? settingsData.reminder_custom : []);
+      // 总开关缺省为开；旧配置文件没有这些键时按默认值展示
+      setReminderEnabled(settingsData?.reminder_enabled !== false);
+      setReminderWeather(settingsData?.reminder_weather || {});
+      setReminderAdvanced(settingsData?.reminder_advanced || {});
       setThemeMode(settingsData?.theme_mode || 'auto');
       setPositionMode(settingsData?.window_position || 'top');
       setActiveTheme(settingsData?.active_theme || '');
@@ -325,13 +365,32 @@ function SoftwareSettingsApp({ onThemeModeChange }) {
     return () => clearTimeout(timer);
   }, [cssStyleObj, persistSettings]);
 
-  // 提醒设置（开关/秒数/文案/自定义提醒）统一防抖落盘
-  const persistReminder = (classOverride, customOverride) => {
+  // 提醒设置（总开关/上下课/自定义/天气/高级）统一防抖落盘。
+  // blockOverride 用来传入“本次刚修改、setState 尚未生效”的最新块，避免闭包读到旧值
+  const persistReminder = (classOverride, customOverride, blockOverride) => {
     const nextClass = classOverride !== undefined ? classOverride : reminderClass;
     const nextCustom = customOverride !== undefined ? customOverride : reminderCustom;
+    const nextEnabled = blockOverride && blockOverride.enabled !== undefined ? blockOverride.enabled : reminderEnabled;
+    const nextWeather = blockOverride && blockOverride.weather !== undefined ? blockOverride.weather : reminderWeather;
+    const nextAdvanced = blockOverride && blockOverride.advanced !== undefined ? blockOverride.advanced : reminderAdvanced;
     schedulePersist('reminder', (nextSettings) => {
+      nextSettings.reminder_enabled = nextEnabled;
       nextSettings.reminder_class = nextClass;
       nextSettings.reminder_custom = nextCustom;
+      nextSettings.reminder_weather = {
+        enabled: nextWeather.enabled || false,
+        time: nextWeather.time || '07:00',
+        city: nextWeather.city || '',
+        extreme_enabled: nextWeather.extreme_enabled || false,
+        quake_enabled: nextWeather.quake_enabled || false,
+      };
+      nextSettings.reminder_advanced = {
+        sound_enabled: nextAdvanced.sound_enabled || false,
+        sound_source: nextAdvanced.sound_source === 'custom' ? 'custom' : 'builtin',
+        sound_file: nextAdvanced.sound_file || '',
+        ontop_enabled: nextAdvanced.ontop_enabled || false,
+        fullscreen_enabled: nextAdvanced.fullscreen_enabled || false,
+      };
     }, '提醒设置已自动保存并生效', 400);
   };
 
@@ -462,6 +521,18 @@ function SoftwareSettingsApp({ onThemeModeChange }) {
                   <p className="field-help">控制主界面课表条和所有设置窗口的深浅色，选择后立即生效并自动保存。</p>
                 </div>
               </div>
+
+              <div className="panel">
+                <h3>快捷方式</h3>
+                <div className="field">
+                  <Button
+                    onClick={() => ipcRenderer.invoke('create-desktop-shortcut')}
+                  >
+                    创建桌面快捷方式
+                  </Button>
+                  <p className="field-help">在桌面创建 eSchedule 的快捷方式，方便快速启动。</p>
+                </div>
+              </div>
             </section>
 
             <section className={`ss-page${activePage === 'components' ? ' active' : ''}`}>
@@ -529,184 +600,411 @@ function SoftwareSettingsApp({ onThemeModeChange }) {
             <section className={`ss-page${activePage === 'reminder' ? ' active' : ''}`}>
               <div className="page-header">
                 <h1 className="page-title">提醒</h1>
-                <p className="page-intro">在主界面课表条上触发提醒遮罩，上下课自动提醒和自定义文本提醒。</p>
+                <p className="page-intro">在主界面课表条上触发提醒遮罩，支持上下课、自定义文本和天气三种提醒来源。</p>
               </div>
-              <div className="panel">
-                <h3>上下课提醒</h3>
-                <p className="field-help">在即将上课、上课、下课时自动触发遮罩提醒，绿色=上课/即将上课，黄色=下课。</p>
-                <div className="settings-grid">
-                  <div className="field">
-                    <label style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-                      <Switch
-                        checked={reminderClass.upcoming_enabled || false}
-                        onChange={(e, d) => {
-                          const next = { ...reminderClass, upcoming_enabled: d.checked };
-                          setReminderClass(next);
-                          persistReminder(next);
-                        }}
-                      />
-                      即将上课提醒
-                    </label>
-                    <Input
-                      type="number"
-                      step="1"
-                      value={String(reminderClass.upcoming_seconds ?? 300)}
-                      onChange={(e) => {
-                        const next = { ...reminderClass, upcoming_seconds: Number(e.target.value) };
-                        setReminderClass(next);
-                        persistReminder(next);
-                      }}
-                      style={{ marginTop: '8px' }}
-                    />
-                    <p className="field-help">距离上课剩余多少秒时提醒</p>
+
+              {/* 总开关：关闭后所有提醒提供方一律不触发 */}
+              <div className={`panel reminder-master${reminderEnabled ? '' : ' is-off'}`}>
+                <div className="reminder-master-row">
+                  <div>
+                    <h3>提醒总开关</h3>
+                    <p className="field-help">关闭后，上下课提醒、自定义文本提醒、天气提醒都不会触发，高级设置也不生效。</p>
                   </div>
-                  <div className="field">
-                    <label style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-                      <Switch
-                        checked={reminderClass.start_enabled || false}
-                        onChange={(e, d) => {
-                          const next = { ...reminderClass, start_enabled: d.checked };
-                          setReminderClass(next);
-                          persistReminder(next);
-                        }}
-                      />
-                      上课提醒
-                    </label>
-                  </div>
-                  <div className="field">
-                    <label style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-                      <Switch
-                        checked={reminderClass.end_enabled || false}
-                        onChange={(e, d) => {
-                          const next = { ...reminderClass, end_enabled: d.checked };
-                          setReminderClass(next);
-                          persistReminder(next);
-                        }}
-                      />
-                      下课提醒
-                    </label>
-                  </div>
-                </div>
-                <div className="settings-grid" style={{ marginTop: '14px' }}>
-                  <div className="field">
-                    <label htmlFor="rcUpcomingText">即将上课文字</label>
-                    <Input
-                      id="rcUpcomingText"
-                      type="text"
-                      value={reminderClass.upcoming_text || ''}
-                      onChange={(e) => {
-                        const next = { ...reminderClass, upcoming_text: e.target.value };
-                        setReminderClass(next);
-                        persistReminder(next);
-                      }}
-                    />
-                  </div>
-                  <div className="field">
-                    <label htmlFor="rcStartText">上课文字</label>
-                    <Input
-                      id="rcStartText"
-                      type="text"
-                      value={reminderClass.start_text || ''}
-                      onChange={(e) => {
-                        const next = { ...reminderClass, start_text: e.target.value };
-                        setReminderClass(next);
-                        persistReminder(next);
-                      }}
-                    />
-                  </div>
-                  <div className="field">
-                    <label htmlFor="rcEndText">下课文字</label>
-                    <Input
-                      id="rcEndText"
-                      type="text"
-                      value={reminderClass.end_text || ''}
-                      onChange={(e) => {
-                        const next = { ...reminderClass, end_text: e.target.value };
-                        setReminderClass(next);
-                        persistReminder(next);
-                      }}
-                    />
-                  </div>
+                  <Switch
+                    checked={reminderEnabled}
+                    onChange={(e, d) => {
+                      setReminderEnabled(d.checked);
+                      persistReminder(undefined, undefined, { enabled: d.checked });
+                    }}
+                  />
                 </div>
               </div>
 
-              <div className="panel">
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
-                  <h3>自定义文本提醒</h3>
-                  <Button className="win-small" onClick={() => {
-                    const id = `rc-${Date.now()}`;
-                    const updated = [...reminderCustom, { id, time: '12:00', text: '', color: '#114514', duration: 5000 }];
-                    setReminderCustom(updated);
-                    persistReminder(undefined, updated);
-                  }}>新增</Button>
+              {/* 提醒提供方：二级菜单在三种来源间切换 */}
+              <div className={`panel${reminderEnabled ? '' : ' panel-disabled'}`}>
+                <h3>提醒提供方</h3>
+                <div className="sub-tabs" role="tablist">
+                  {[
+                    { key: 'class', label: '上下课提醒' },
+                    { key: 'custom', label: '自定义文本提醒' },
+                    { key: 'weather', label: '天气提醒' },
+                  ].map((tab) => (
+                    <button
+                      type="button"
+                      key={tab.key}
+                      className={`sub-tab${reminderProviderTab === tab.key ? ' active' : ''}`}
+                      onClick={() => setReminderProviderTab(tab.key)}
+                    >{tab.label}</button>
+                  ))}
                 </div>
-                <p className="field-help">每天到指定时间触发提醒，可设多条。遮罩从课表中央扩散展开并显示文字。</p>
-                {reminderCustom.length === 0 ? (
-                  <div className="empty" style={{ padding: '12px' }}>暂无自定义提醒，点击"新增"按钮添加。</div>
-                ) : (
-                  reminderCustom.map((item, i) => (
-                    <div key={item.id} className="settings-grid" style={{ marginBottom: '12px', paddingBottom: '12px', borderBottom: '1px solid var(--colorNeutralStroke2)' }}>
-                      <div className="field">
-                        <label>时间</label>
-                        <Input
-                          type="text"
-                          placeholder="HH:MM"
-                          value={item.time || ''}
-                          onChange={(e) => {
-                            const updated = reminderCustom.map((it, j) => j === i ? { ...it, time: e.target.value } : it);
-                            setReminderCustom(updated);
-                            persistReminder(undefined, updated);
+
+                <div className={`sub-page${reminderProviderTab === 'class' ? ' active' : ''}`}>
+                  <p className="field-help">在即将上课、上课、下课时自动触发遮罩提醒，绿色=上课/即将上课，黄色=下课。</p>
+                  <div className="settings-grid">
+                    <div className="field">
+                      <label style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                        <Switch
+                          checked={reminderClass.upcoming_enabled || false}
+                          onChange={(e, d) => {
+                            const next = { ...reminderClass, upcoming_enabled: d.checked };
+                            setReminderClass(next);
+                            persistReminder(next);
                           }}
                         />
-                      </div>
-                      <div className="field">
-                        <label>提醒文字</label>
-                        <Input
-                          type="text"
-                          value={item.text || ''}
-                          onChange={(e) => {
-                            const updated = reminderCustom.map((it, j) => j === i ? { ...it, text: e.target.value } : it);
-                            setReminderCustom(updated);
-                            persistReminder(undefined, updated);
-                          }}
-                        />
-                      </div>
-                      <div className="field">
-                        <label>遮罩颜色</label>
-                        <input
-                          type="color"
-                          className="native-color"
-                          value={item.color || '#114514'}
-                          onChange={(e) => {
-                            const updated = reminderCustom.map((it, j) => j === i ? { ...it, color: e.target.value } : it);
-                            setReminderCustom(updated);
-                            persistReminder(undefined, updated);
-                          }}
-                        />
-                      </div>
-                      <div className="field">
-                        <label>持续毫秒</label>
-                        <Input
-                          type="number"
-                          step="100"
-                          value={String(item.duration ?? 5000)}
-                          onChange={(e) => {
-                            const updated = reminderCustom.map((it, j) => j === i ? { ...it, duration: Number(e.target.value) } : it);
-                            setReminderCustom(updated);
-                            persistReminder(undefined, updated);
-                          }}
-                        />
-                      </div>
-                      <div className="field" style={{ alignSelf: 'flex-end' }}>
-                        <Button className="win-small" onClick={() => {
-                          const updated = reminderCustom.filter((_, j) => j !== i);
-                          setReminderCustom(updated);
-                          persistReminder(undefined, updated);
-                        }}>删除</Button>
-                      </div>
+                        即将上课提醒
+                      </label>
+                      <Input
+                        type="number"
+                        step="1"
+                        value={String(reminderClass.upcoming_seconds ?? 300)}
+                        onChange={(e) => {
+                          const next = { ...reminderClass, upcoming_seconds: Number(e.target.value) };
+                          setReminderClass(next);
+                          persistReminder(next);
+                        }}
+                        style={{ marginTop: '8px' }}
+                      />
+                      <p className="field-help">距离上课剩余多少秒时提醒</p>
                     </div>
-                  ))
-                )}
+                    <div className="field">
+                      <label style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                        <Switch
+                          checked={reminderClass.start_enabled || false}
+                          onChange={(e, d) => {
+                            const next = { ...reminderClass, start_enabled: d.checked };
+                            setReminderClass(next);
+                            persistReminder(next);
+                          }}
+                        />
+                        上课提醒
+                      </label>
+                    </div>
+                    <div className="field">
+                      <label style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                        <Switch
+                          checked={reminderClass.end_enabled || false}
+                          onChange={(e, d) => {
+                            const next = { ...reminderClass, end_enabled: d.checked };
+                            setReminderClass(next);
+                            persistReminder(next);
+                          }}
+                        />
+                        下课提醒
+                      </label>
+                    </div>
+                  </div>
+                  <div className="settings-grid" style={{ marginTop: '14px' }}>
+                    <div className="field">
+                      <label htmlFor="rcUpcomingText">即将上课文字</label>
+                      <Input
+                        id="rcUpcomingText"
+                        type="text"
+                        value={reminderClass.upcoming_text || ''}
+                        onChange={(e) => {
+                          const next = { ...reminderClass, upcoming_text: e.target.value };
+                          setReminderClass(next);
+                          persistReminder(next);
+                        }}
+                      />
+                    </div>
+                    <div className="field">
+                      <label htmlFor="rcStartText">上课文字</label>
+                      <Input
+                        id="rcStartText"
+                        type="text"
+                        value={reminderClass.start_text || ''}
+                        onChange={(e) => {
+                          const next = { ...reminderClass, start_text: e.target.value };
+                          setReminderClass(next);
+                          persistReminder(next);
+                        }}
+                      />
+                    </div>
+                    <div className="field">
+                      <label htmlFor="rcEndText">下课文字</label>
+                      <Input
+                        id="rcEndText"
+                        type="text"
+                        value={reminderClass.end_text || ''}
+                        onChange={(e) => {
+                          const next = { ...reminderClass, end_text: e.target.value };
+                          setReminderClass(next);
+                          persistReminder(next);
+                        }}
+                      />
+                    </div>
+                  </div>
+                </div>
+
+                <div className={`sub-page${reminderProviderTab === 'custom' ? ' active' : ''}`}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
+                    <p className="field-help" style={{ margin: 0 }}>每天到指定时间触发提醒，可设多条。遮罩从课表中央扩散展开并显示文字。</p>
+                    <Button className="win-small" onClick={() => {
+                      const id = `rc-${Date.now()}`;
+                      const updated = [...reminderCustom, { id, time: '12:00', text: '', color: '#114514', duration: 5000 }];
+                      setReminderCustom(updated);
+                      persistReminder(undefined, updated);
+                    }}>新增</Button>
+                  </div>
+                  {reminderCustom.length === 0 ? (
+                    <div className="empty" style={{ padding: '12px' }}>暂无自定义提醒，点击"新增"按钮添加。</div>
+                  ) : (
+                    reminderCustom.map((item, i) => (
+                      <div key={item.id} className="settings-grid" style={{ marginBottom: '12px', paddingBottom: '12px', borderBottom: '1px solid var(--colorNeutralStroke2)' }}>
+                        <div className="field">
+                          <label>时间</label>
+                          <Input
+                            type="text"
+                            placeholder="HH:MM"
+                            value={item.time || ''}
+                            onChange={(e) => {
+                              const updated = reminderCustom.map((it, j) => j === i ? { ...it, time: e.target.value } : it);
+                              setReminderCustom(updated);
+                              persistReminder(undefined, updated);
+                            }}
+                          />
+                        </div>
+                        <div className="field">
+                          <label>提醒文字</label>
+                          <Input
+                            type="text"
+                            value={item.text || ''}
+                            onChange={(e) => {
+                              const updated = reminderCustom.map((it, j) => j === i ? { ...it, text: e.target.value } : it);
+                              setReminderCustom(updated);
+                              persistReminder(undefined, updated);
+                            }}
+                          />
+                        </div>
+                        <div className="field">
+                          <label>遮罩颜色</label>
+                          <input
+                            type="color"
+                            className="native-color"
+                            value={item.color || '#114514'}
+                            onChange={(e) => {
+                              const updated = reminderCustom.map((it, j) => j === i ? { ...it, color: e.target.value } : it);
+                              setReminderCustom(updated);
+                              persistReminder(undefined, updated);
+                            }}
+                          />
+                        </div>
+                        <div className="field">
+                          <label>持续毫秒</label>
+                          <Input
+                            type="number"
+                            step="100"
+                            value={String(item.duration ?? 5000)}
+                            onChange={(e) => {
+                              const updated = reminderCustom.map((it, j) => j === i ? { ...it, duration: Number(e.target.value) } : it);
+                              setReminderCustom(updated);
+                              persistReminder(undefined, updated);
+                            }}
+                          />
+                        </div>
+                        <div className="field" style={{ alignSelf: 'flex-end' }}>
+                          <Button className="win-small" onClick={() => {
+                            const updated = reminderCustom.filter((_, j) => j !== i);
+                            setReminderCustom(updated);
+                            persistReminder(undefined, updated);
+                          }}>删除</Button>
+                        </div>
+                      </div>
+                    ))
+                  )}
+                </div>
+
+                <div className={`sub-page${reminderProviderTab === 'weather' ? ' active' : ''}`}>
+                  <div className="settings-grid">
+                    <div className="field">
+                      <label style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                        <Switch
+                          checked={reminderWeather.enabled || false}
+                          onChange={(e, d) => {
+                            const next = { ...reminderWeather, enabled: d.checked };
+                            setReminderWeather(next);
+                            persistReminder(undefined, undefined, { weather: next });
+                          }}
+                        />
+                        启用每日天气提醒
+                      </label>
+                    </div>
+                    <div className="field">
+                      <label htmlFor="rwTime">播报时间</label>
+                      <Input
+                        id="rwTime"
+                        type="text"
+                        placeholder="HH:MM"
+                        value={reminderWeather.time || '07:00'}
+                        onChange={(e) => {
+                          const next = { ...reminderWeather, time: e.target.value };
+                          setReminderWeather(next);
+                          persistReminder(undefined, undefined, { weather: next });
+                        }}
+                      />
+                      <p className="field-help">每天到该时间播报一次天气</p>
+                    </div>
+                    <div className="field">
+                      <label htmlFor="rwCity">城市</label>
+                      <Input
+                        id="rwCity"
+                        type="text"
+                        placeholder="留空 = 自动定位"
+                        value={reminderWeather.city || ''}
+                        onChange={(e) => {
+                          const next = { ...reminderWeather, city: e.target.value };
+                          setReminderWeather(next);
+                          persistReminder(undefined, undefined, { weather: next });
+                        }}
+                      />
+                      <p className="field-help">可填城市名（如"太原"），留空则按当前网络自动定位</p>
+                    </div>
+                    <div className="field">
+                      <label style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                        <Switch
+                          checked={reminderWeather.extreme_enabled || false}
+                          onChange={(e, d) => {
+                            const next = { ...reminderWeather, extreme_enabled: d.checked };
+                            setReminderWeather(next);
+                            persistReminder(undefined, undefined, { weather: next });
+                          }}
+                        />
+                        极端天气提醒
+                      </label>
+                      <p className="field-help">每 10 分钟检测一次，遇到大雨、冻雨、大雪、强阵雨、雷暴等极端天气立即提醒，同一种天气每天最多提醒一次。</p>
+                    </div>
+                    <div className="field">
+                      <label style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                        <Switch
+                          checked={reminderWeather.quake_enabled || false}
+                          onChange={(e, d) => {
+                            const next = { ...reminderWeather, quake_enabled: d.checked };
+                            setReminderWeather(next);
+                            persistReminder(undefined, undefined, { weather: next });
+                          }}
+                        />
+                        地震预警
+                      </label>
+                      <p className="field-help">每分钟比对中国地震台网速报，新发布的 4.0 级以上、30 分钟内发生的地震立即提醒，按事件编号去重不重复通知。</p>
+                    </div>
+                  </div>
+                  <p className="field-help">每日播报内容形如"太原 12° 晴"；遇到雨、雪、雷、雾等天气时文案会追加"注意天气变化"提示。</p>
+                </div>
+              </div>
+
+              {/* 高级设置：音效 / 置顶 / 全屏，二级菜单切换 */}
+              <div className={`panel${reminderEnabled ? '' : ' panel-disabled'}`}>
+                <h3>高级设置</h3>
+                <div className="sub-tabs" role="tablist">
+                  {[
+                    { key: 'sound', label: '提醒音效' },
+                    { key: 'ontop', label: '提醒置顶' },
+                    { key: 'fullscreen', label: '全屏提醒' },
+                  ].map((tab) => (
+                    <button
+                      type="button"
+                      key={tab.key}
+                      className={`sub-tab${reminderAdvancedTab === tab.key ? ' active' : ''}`}
+                      onClick={() => setReminderAdvancedTab(tab.key)}
+                    >{tab.label}</button>
+                  ))}
+                </div>
+
+                <div className={`sub-page${reminderAdvancedTab === 'sound' ? ' active' : ''}`}>
+                  <div className="settings-grid">
+                    <div className="field">
+                      <label style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                        <Switch
+                          checked={reminderAdvanced.sound_enabled || false}
+                          onChange={(e, d) => {
+                            const next = { ...reminderAdvanced, sound_enabled: d.checked };
+                            setReminderAdvanced(next);
+                            persistReminder(undefined, undefined, { advanced: next });
+                          }}
+                        />
+                        提醒时播放音效
+                      </label>
+                    </div>
+                    <div className="field">
+                      <label htmlFor="rwSoundSource">声音来源</label>
+                      <Select
+                        id="rwSoundSource"
+                        value={reminderAdvanced.sound_source === 'custom' ? 'custom' : 'builtin'}
+                        onChange={(e) => {
+                          const next = { ...reminderAdvanced, sound_source: e.target.value };
+                          setReminderAdvanced(next);
+                          persistReminder(undefined, undefined, { advanced: next });
+                        }}
+                      >
+                        <option value="builtin">内置提示音（叮咚）</option>
+                        <option value="custom">自定义音频文件</option>
+                      </Select>
+                    </div>
+                    {reminderAdvanced.sound_source === 'custom' ? (
+                      <div className="field">
+                        <label>音频文件</label>
+                        <div style={{ display: 'flex', gap: '8px' }}>
+                          <Input
+                            type="text"
+                            readOnly
+                            placeholder="点击右侧选择 mp3 / wav 文件"
+                            value={reminderAdvanced.sound_file || ''}
+                            style={{ flex: 1 }}
+                          />
+                          <Button className="win-small" onClick={async () => {
+                            const picked = await ipcRenderer.invoke('select-reminder-sound');
+                            if (picked) {
+                              const next = { ...reminderAdvanced, sound_file: picked };
+                              setReminderAdvanced(next);
+                              persistReminder(undefined, undefined, { advanced: next });
+                            }
+                          }}>选择</Button>
+                        </div>
+                      </div>
+                    ) : null}
+                    <div className="field" style={{ alignSelf: 'flex-end' }}>
+                      <Button className="win-small" onClick={() => previewReminderSound(reminderAdvanced)}>试听</Button>
+                    </div>
+                  </div>
+                </div>
+
+                <div className={`sub-page${reminderAdvancedTab === 'ontop' ? ' active' : ''}`}>
+                  <div className="settings-grid">
+                    <div className="field">
+                      <label style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                        <Switch
+                          checked={reminderAdvanced.ontop_enabled || false}
+                          onChange={(e, d) => {
+                            const next = { ...reminderAdvanced, ontop_enabled: d.checked };
+                            setReminderAdvanced(next);
+                            persistReminder(undefined, undefined, { advanced: next });
+                          }}
+                        />
+                        提醒期间窗口置顶
+                      </label>
+                      <p className="field-help">提醒弹出的几秒钟内把课表窗口临时提到最前，结束后自动恢复原来的置顶设置。</p>
+                    </div>
+                  </div>
+                </div>
+
+                <div className={`sub-page${reminderAdvancedTab === 'fullscreen' ? ' active' : ''}`}>
+                  <div className="settings-grid">
+                    <div className="field">
+                      <label style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                        <Switch
+                          checked={reminderAdvanced.fullscreen_enabled || false}
+                          onChange={(e, d) => {
+                            const next = { ...reminderAdvanced, fullscreen_enabled: d.checked };
+                            setReminderAdvanced(next);
+                            persistReminder(undefined, undefined, { advanced: next });
+                          }}
+                        />
+                        全屏提醒
+                      </label>
+                      <p className="field-help">在普通提醒（课表条遮罩与文字）的基础上，额外在全屏叠加一层提醒颜色的光效：从课表条位置向全屏扩散，持续 1 秒（前 0.3 秒渐显扩散、后 0.7 秒渐隐），与提醒时长无关；光效窗口点击穿透，不影响正常操作。</p>
+                    </div>
+                  </div>
+                </div>
               </div>
             </section>
 

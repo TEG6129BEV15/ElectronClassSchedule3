@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Menu, ipcMain, dialog, screen, Tray, shell, powerMonitor, nativeTheme } = require('electron')
+const { app, BrowserWindow, Menu, ipcMain, dialog, screen, Tray, shell, powerMonitor, nativeTheme, net } = require('electron')
 const path = require('path');
 const fs = require('fs')
 const os = require('os')
@@ -42,12 +42,10 @@ const USER32_ACRYLIC_TINT = {
     light: { color: '#f3f3f3', alpha: 0.65 },
 };
 let tray = undefined;
-let form = undefined;
 var win = undefined;
 let configEditorWin = undefined;
 let softwareSettingsWin = undefined;
 let courseFusionWin = undefined;
-let template = []
 let basePath = app.isPackaged ? './resources/app/' : './'
 if (!app.requestSingleInstanceLock({ key: 'classSchedule' })) {
     app.quit();
@@ -124,6 +122,26 @@ const createWindow = () => {
     if (store.get('isWindowAlwaysOnTop', true))
         win.setAlwaysOnTop(true, 'screen-saver', 9999999999999)
 }
+// 构造快捷方式参数。
+// 打包后 app.getPath('exe') 即 eSchedule.exe，可直接作为目标；
+// 开发态它是 node_modules 里的 electron.exe，必须把应用目录作为参数传入，
+// 否则双击快捷方式只会打开 Electron 默认欢迎页。
+function buildShortcutOptions(iconPath) {
+    const exePath = app.getPath('exe');
+    const options = {
+        target: exePath,
+        workingDir: path.dirname(exePath),
+    };
+    if (!app.isPackaged) {
+        options.args = `"${app.getAppPath()}"`;
+        options.workingDir = app.getAppPath();
+    }
+    if (iconPath && fs.existsSync(iconPath)) {
+        options.icon = iconPath;
+    }
+    return options;
+}
+
 function setAutoLaunch() {
     const shortcutName = '电子课表(请勿重命名).lnk'
     app.setLoginItemSettings({ // backward compatible
@@ -132,10 +150,8 @@ function setAutoLaunch() {
     })
     if (store.get('isAutoLaunch', true)) {
         createShortcut.create(startupFolderPath + '/' + shortcutName,
-            {
-                target: app.getPath('exe'),
-                workingDir: app.getPath('exe').split('\\').slice(0, -1).join('\\'),
-            }, (e) => { e && console.log(e); })
+            buildShortcutOptions(path.join(__dirname, 'image', 'icon.ico')),
+            (e) => { e && console.log(e); })
     } else {
         fs.unlink(startupFolderPath + '/' + shortcutName, () => { })
     }
@@ -561,120 +577,439 @@ function createTrayMenu() {
         tray.destroy();
     }
     tray = new Tray(basePath + 'image/icon.png')
-    template = [
-        
-        
-        {
-            icon: basePath + 'image/adjust.png',
-            label: '临时调课',
-            click: () => {
-                win.webContents.send('openSettingDialog')
-            }
-        },
-        {
-            icon: basePath + 'image/fusion.png',
-            label: '课程融合',
-            click: () => {
-                openCourseFusionWindow()
-            }
-        },
-        {
-            icon: basePath + 'image/toggle.png',
-            label: '加载临时课表',
-            click: () => {
-                win.webContents.send('setDayOffset')
-            }
-        },
-        {
-            type: 'separator'
-        },
-        {
-            id: 'countdown',
-            label: '课上计时',
-            type: 'checkbox',
-            checked: store.get('isDuringClassCountdown', true),
-            click: (e) => {
-                store.set('isDuringClassCountdown', e.checked)
-                win.webContents.send('ClassCountdown', e.checked)
-            }
-        },
-        {
-            label: '窗口置顶',
-            type: 'checkbox',
-            checked: store.get('isWindowAlwaysOnTop', true),
-            click: (e) => {
-                store.set('isWindowAlwaysOnTop', e.checked)
-                if (store.get('isWindowAlwaysOnTop', true))
-                    win.setAlwaysOnTop(true, 'screen-saver', 9999999999999)
-                else
-                    win.setAlwaysOnTop(false)
-            }
-        },
-        {
-            label: '上课隐藏',
-            type: 'checkbox',
-            checked: store.get('isDuringClassHidden', false),
-            click: (e) => {
-                store.set('isDuringClassHidden', e.checked)
-                win.webContents.send('ClassHidden', e.checked)
-            }
-        },
-        {
-            label: '显示次日课程（测试）',
-            type: 'checkbox',
-            checked: store.get('showNextDayAfterSchool', false),
-            click: (e) => {
-                store.set('showNextDayAfterSchool', e.checked)
-                win.webContents.send('NextDayAfterSchool', e.checked)
-            }
-        },
-        {
-            label: '开机启动',
-            type: 'checkbox',
-            checked: store.get('isAutoLaunch', true),
-            click: (e) => {
-                store.set('isAutoLaunch', e.checked)
-                setAutoLaunch()
-            }
-        },
-        {
-            type: 'separator'
-        },
-        {
-            icon: basePath + 'image/editor.png',
-            label: '课表配置编辑器',
-            click: () => {
-                openConfigEditorWindow()
-            }
-        },
-        {
-            icon: basePath + 'image/setting.png',
-            label: '软件设置',
-            click: () => {
-                openSoftwareSettingsWindow()
-            }
-        },
-        {
-            type: 'separator'
-        },
-        {
-            icon: basePath + 'image/quit.png',
-            label: '退出程序',
-            click: () => {
-                // 右键菜单退出无需二次确认，直接退出
-                app.quit();
+    tray.setToolTip('电子课表 - by lsl and TEG6129BEV15')
+    // 左键/右键均弹出自绘菜单（按钮、字体、图标整体放大）
+    tray.on('click', openTrayMenu)
+    tray.on('right-click', openTrayMenu)
+    // 启动即预创建并加载菜单窗口，避免首次点击时才加载导致“页面缺失/延迟”
+    ensureTrayMenuWindow()
+}
+
+// ===== 自绘托盘菜单（独立的透明无边框窗口） =====
+const TRAY_MENU_WIDTH = 248;
+let trayMenuWin = undefined;
+let trayMenuReady = false;
+// true 表示本次收到尺寸后需要定位并弹出窗口；勾选状态刷新时只更新尺寸
+let trayMenuPendingShow = false;
+// 最近一次实际弹出的时间戳，用于屏蔽 showInactive 瞬间的失焦抖动
+let trayMenuShownAt = 0;
+
+const iconUrl = (name) => require('url').pathToFileURL(path.join(__dirname, 'image', name)).href;
+
+function buildTrayMenuModel() {
+    return [
+        { id: 'adjust', label: '临时调课', icon: iconUrl('adjust.png') },
+        { id: 'fusion', label: '课程融合', icon: iconUrl('fusion.png') },
+        { id: 'temp', label: '加载临时课表', icon: iconUrl('toggle.png') },
+        { type: 'separator' },
+        { id: 'countdown', label: '课上计时', type: 'checkbox', checked: store.get('isDuringClassCountdown', true) },
+        { id: 'ontop', label: '窗口置顶', type: 'checkbox', checked: store.get('isWindowAlwaysOnTop', true) },
+        { id: 'hidden', label: '上课隐藏', type: 'checkbox', checked: store.get('isDuringClassHidden', false) },
+        { id: 'nextday', label: '显示次日课程（测试）', type: 'checkbox', checked: store.get('showNextDayAfterSchool', false) },
+        { id: 'autostart', label: '开机启动', type: 'checkbox', checked: store.get('isAutoLaunch', true) },
+        { type: 'separator' },
+        { id: 'editor', label: '课表配置编辑器', icon: iconUrl('editor.png') },
+        { id: 'settings', label: '软件设置', icon: iconUrl('setting.png') },
+        { type: 'separator' },
+        { id: 'restart', label: '重启', svg: 'restart' },
+        { id: 'quit', label: '退出程序', icon: iconUrl('quit.png') }
+    ];
+}
+
+function sendTrayMenuData() {
+    if (!trayMenuWin || trayMenuWin.isDestroyed() || !trayMenuReady) return;
+    trayMenuPendingShow = true;
+    pushTrayMenuData();
+}
+
+// 仅下发菜单数据（预热刷新），不把窗口标记为“待弹出”
+function pushTrayMenuData() {
+    if (!trayMenuWin || trayMenuWin.isDestroyed() || !trayMenuReady) return;
+    trayMenuWin.webContents.send('tray-menu-data', {
+        dark: nativeTheme.shouldUseDarkColors,
+        items: buildTrayMenuModel()
+    });
+}
+
+// 创建并预加载隐藏的菜单窗口；已存在则直接复用
+function ensureTrayMenuWindow() {
+    if (trayMenuWin && !trayMenuWin.isDestroyed()) return trayMenuWin;
+    trayMenuReady = false;
+    trayMenuPendingShow = false;
+    trayMenuWin = new BrowserWindow({
+        width: TRAY_MENU_WIDTH,
+        height: 120,
+        frame: false,
+        transparent: true,
+        resizable: false,
+        movable: false,
+        minimizable: false,
+        maximizable: false,
+        fullscreenable: false,
+        skipTaskbar: true,
+        show: false,
+        hasShadow: false,
+        webPreferences: {
+            nodeIntegration: true,
+            contextIsolation: false,
+            enableRemoteModule: true,
+            backgroundThrottling: false
+        }
+    });
+    trayMenuWin.loadFile('tray-menu.html');
+    // 点击菜单外任意区域触发失焦，自动收起
+    trayMenuWin.on('blur', () => {
+        closeTrayMenu();
+    });
+    trayMenuWin.on('closed', () => {
+        trayMenuWin = undefined;
+        trayMenuReady = false;
+    });
+    return trayMenuWin;
+}
+
+function openTrayMenu() {
+    if (trayMenuWin && !trayMenuWin.isDestroyed() && trayMenuWin.isVisible()) {
+        closeTrayMenu();
+        return;
+    }
+    // 窗口通常在启动时已预热完成，这里只做数据刷新与弹出
+    ensureTrayMenuWindow();
+    if (trayMenuReady) {
+        sendTrayMenuData();
+    }
+    // 未就绪时：tray-menu-ready 到达后仅下发数据；预热阶段不应自动弹出，
+    // 因此在 ready 处理器中按 pendingShow 决定
+    trayMenuPendingShow = true;
+}
+
+function closeTrayMenu() {
+    if (trayMenuWin && !trayMenuWin.isDestroyed() && trayMenuWin.isVisible()) {
+        trayMenuWin.hide();
+    }
+    // 恢复主窗口置顶状态
+    if (win && !win.isDestroyed() && store.get('isWindowAlwaysOnTop', true)) {
+        win.setAlwaysOnTop(true, 'screen-saver', 9999999999999);
+    }
+}
+
+// 执行菜单项动作；返回 true 表示菜单保持打开（勾选类）
+function executeTrayAction(id) {
+    switch (id) {
+        case 'adjust':
+            win.webContents.send('openSettingDialog');
+            return false;
+        case 'fusion':
+            openCourseFusionWindow();
+            return false;
+        case 'temp':
+            win.webContents.send('setDayOffset');
+            return false;
+        case 'countdown': {
+            const checked = !store.get('isDuringClassCountdown', true);
+            store.set('isDuringClassCountdown', checked);
+            win.webContents.send('ClassCountdown', checked);
+            return true;
+        }
+        case 'ontop': {
+            const checked = !store.get('isWindowAlwaysOnTop', true);
+            store.set('isWindowAlwaysOnTop', checked);
+            if (checked)
+                win.setAlwaysOnTop(true, 'screen-saver', 9999999999999);
+            else
+                win.setAlwaysOnTop(false);
+            return true;
+        }
+        case 'hidden': {
+            const checked = !store.get('isDuringClassHidden', false);
+            store.set('isDuringClassHidden', checked);
+            win.webContents.send('ClassHidden', checked);
+            return true;
+        }
+        case 'nextday': {
+            const checked = !store.get('showNextDayAfterSchool', false);
+            store.set('showNextDayAfterSchool', checked);
+            win.webContents.send('NextDayAfterSchool', checked);
+            return true;
+        }
+        case 'autostart': {
+            const checked = !store.get('isAutoLaunch', true);
+            store.set('isAutoLaunch', checked);
+            setAutoLaunch();
+            return true;
+        }
+        case 'editor':
+            openConfigEditorWindow();
+            return false;
+        case 'settings':
+            openSoftwareSettingsWindow();
+            return false;
+        case 'restart':
+            // 立即退出并重新启动本程序
+            app.relaunch();
+            app.exit(0);
+            return false;
+        case 'quit':
+            // 右键菜单退出无需二次确认，直接退出
+            app.quit();
+            return false;
+        default:
+            return false;
+    }
+}
+
+ipcMain.on('tray-menu-ready', () => {
+    trayMenuReady = true;
+    // 预热启动（无弹出意图）时只下发数据，收到尺寸也不显示窗口
+    if (trayMenuPendingShow) sendTrayMenuData();
+    else pushTrayMenuData();
+})
+
+ipcMain.on('tray-menu-size', (event, size) => {
+    if (!trayMenuWin || trayMenuWin.isDestroyed() || !size) return;
+    const height = Math.max(1, Math.round(size.height || 120));
+
+    // 勾选刷新导致的重渲染：菜单已可见时只跟随更新高度，不重复弹出
+    if (trayMenuWin.isVisible()) {
+        const bounds = trayMenuWin.getBounds();
+        if (bounds.height !== height) {
+            trayMenuWin.setBounds({
+                x: bounds.x,
+                y: bounds.y + bounds.height - height,
+                width: TRAY_MENU_WIDTH,
+                height
+            });
+        }
+        return;
+    }
+    if (!trayMenuPendingShow) return;
+    trayMenuPendingShow = false;
+
+    // 贴近托盘图标上方显示（空间不足时显示在下方），并限制在显示器工作区内
+    const tb = tray.getBounds();
+    const display = screen.getDisplayNearestPoint({ x: tb.x, y: tb.y });
+    const wa = display.workArea;
+    let x = Math.round(tb.x + tb.width / 2 - TRAY_MENU_WIDTH / 2);
+    x = Math.max(wa.x + 4, Math.min(x, wa.x + wa.width - TRAY_MENU_WIDTH - 4));
+    let y = Math.round(tb.y - height - 8);
+    if (y < wa.y + 4) y = tb.y + tb.height + 8;
+    trayMenuWin.setBounds({ x, y, width: TRAY_MENU_WIDTH, height });
+    trayMenuShownAt = Date.now();
+    trayMenuWin.show();
+    trayMenuWin.focus();
+    // 临时取消主窗口置顶，让菜单窗口能正常获取焦点
+    if (win && !win.isDestroyed()) {
+        win.setAlwaysOnTop(false);
+    }
+})
+
+ipcMain.on('tray-menu-action', (event, id) => {
+    const keepOpen = executeTrayAction(id);
+    if (keepOpen) {
+        // 勾选类：保持菜单打开并刷新勾选状态
+        sendTrayMenuData();
+    } else {
+        closeTrayMenu();
+    }
+})
+
+ipcMain.on('tray-menu-close', () => {
+    closeTrayMenu();
+})
+
+// ===== 天气组件：主进程代理网络请求（绕开 CORS），结果缓存 10 分钟 =====
+const weatherCache = new Map(); // cityKey -> { at, data }
+const WEATHER_TTL = 10 * 60 * 1000;
+
+// WMO 天气代码 -> [中文描述, emoji]
+const WEATHER_CODE_MAP = {
+    0: ['晴', '☀️'],
+    1: ['大致晴朗', '🌤️'], 2: ['局部多云', '⛅'], 3: ['阴', '☁️'],
+    45: ['雾', '🌫️'], 48: ['雾凇', '🌫️'],
+    51: ['小毛毛雨', '🌦️'], 53: ['毛毛雨', '🌦️'], 55: ['大毛毛雨', '🌧️'],
+    56: ['冻毛毛雨', '🌧️'], 57: ['冻毛毛雨', '🌧️'],
+    61: ['小雨', '🌦️'], 63: ['中雨', '🌧️'], 65: ['大雨', '🌧️'],
+    66: ['冻雨', '🌧️'], 67: ['冻雨', '🌧️'],
+    71: ['小雪', '🌨️'], 73: ['中雪', '🌨️'], 75: ['大雪', '❄️'], 77: ['雪粒', '🌨️'],
+    80: ['小阵雨', '🌦️'], 81: ['阵雨', '🌧️'], 82: ['强阵雨', '⛈️'],
+    85: ['阵雪', '🌨️'], 86: ['强阵雪', '❄️'],
+    95: ['雷阵雨', '⛈️'], 96: ['雷阵雨伴冰雹', '⛈️'], 99: ['强雷阵雨伴冰雹', '⛈️'],
+};
+
+async function fetchWeatherJson(url, timeoutMs = 8000) {
+    // 显式超时：net.fetch 默认可能长时间挂起，导致组件一直停留在占位状态
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+        const response = await net.fetch(url, { cache: 'no-store', signal: controller.signal });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return await response.json();
+    } finally {
+        clearTimeout(timer);
+    }
+}
+
+// 上次成功结果落盘，网络全失败时兜底，避免直接显示“天气不可用”
+function getWeatherDiskCachePath() {
+    return path.join(app.getPath('userData'), 'weather-cache.json');
+}
+function readWeatherDiskCache() {
+    try { return JSON.parse(fs.readFileSync(getWeatherDiskCachePath(), 'utf8')) || {}; }
+    catch { return {}; }
+}
+function writeWeatherDiskCache(cache) {
+    try { fs.writeFileSync(getWeatherDiskCachePath(), JSON.stringify(cache), 'utf8'); }
+    catch { /* 磁盘不可写时忽略 */ }
+}
+
+// 兜底供应商返回的城市名多为英文，用 open-meteo geocoding 反查中文名；
+// 失败或本就是中文则原样返回
+async function localizeCityName(cityName) {
+    if (!cityName || /[\u4e00-\u9fa5]/.test(cityName)) return cityName;
+    try {
+        const found = await fetchWeatherJson(
+            `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(cityName)}&count=1&language=zh&format=json`
+        );
+        const place = found?.results?.[0];
+        if (place && place.name) return place.name;
+    } catch { /* 保留原名 */ }
+    return cityName;
+}
+
+// 自动定位：多供应商兜底。ip-api 为明文 HTTP 免费接口，国内偶发被重置或
+// 触发限流（45 次/分钟），失败时依次改用 HTTPS 的 ipinfo.io、geojs.io
+async function resolveGeoByIp() {
+    try {
+        const geo = await fetchWeatherJson('http://ip-api.com/json/?lang=zh-CN');
+        if (geo.status === 'success' && typeof geo.lat === 'number') {
+            return { latitude: geo.lat, longitude: geo.lon, cityName: geo.city || geo.regionName || '' };
+        }
+    } catch (error) {
+        console.log('[weather] ip-api 定位失败:', error && error.message ? error.message : error);
+    }
+    try {
+        const geo = await fetchWeatherJson('https://ipinfo.io/json');
+        if (typeof geo.loc === 'string') {
+            const pair = geo.loc.split(',').map(Number);
+            if (pair.length === 2 && Number.isFinite(pair[0]) && Number.isFinite(pair[1])) {
+                return { latitude: pair[0], longitude: pair[1], cityName: await localizeCityName(geo.city || '') };
             }
         }
-    ]
-    form = Menu.buildFromTemplate(template)
-    tray.setToolTip('电子课表 - by lsl and TEG6129BEV15')
-    function trayClicked() {
-        tray.popUpContextMenu(form)
+    } catch (error) {
+        console.log('[weather] ipinfo.io 定位失败:', error && error.message ? error.message : error);
     }
-    tray.on('click', trayClicked)
-    tray.on('right-click', trayClicked)
-    tray.setContextMenu(form)
+    try {
+        const geo = await fetchWeatherJson('https://get.geojs.io/v1/ip/geo.json');
+        const lat = Number(geo.latitude);
+        const lon = Number(geo.longitude);
+        if (Number.isFinite(lat) && Number.isFinite(lon)) {
+            return { latitude: lat, longitude: lon, cityName: await localizeCityName(geo.city || '') };
+        }
+    } catch (error) {
+        console.log('[weather] geojs.io 定位失败:', error && error.message ? error.message : error);
+    }
+    throw new Error('all geo providers failed');
 }
+
+ipcMain.handle('get-weather', async (event, cityInput) => {
+    const key = String(cityInput || '').trim() || 'auto';
+    const cached = weatherCache.get(key);
+    if (cached && Date.now() - cached.at < WEATHER_TTL) return cached.data;
+    try {
+        let latitude;
+        let longitude;
+        let cityName;
+        if (key === 'auto') {
+            ({ latitude, longitude, cityName } = await resolveGeoByIp());
+        } else {
+            const found = await fetchWeatherJson(
+                `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(key)}&count=1&language=zh&format=json`
+            );
+            const place = found?.results?.[0];
+            if (!place) throw new Error('city not found');
+            latitude = place.latitude;
+            longitude = place.longitude;
+            cityName = place.name || key;
+        }
+        // 预报接口偶发抖动，失败重试一次
+        let weather;
+        for (let attempt = 0; ; attempt++) {
+            try {
+                weather = await fetchWeatherJson(
+                    `https://api.open-meteo.com/v1/forecast?latitude=${latitude}&longitude=${longitude}`
+                    + '&current=temperature_2m,weather_code&timezone=auto'
+                );
+                break;
+            } catch (error) {
+                if (attempt >= 1) throw error;
+            }
+        }
+        const code = weather?.current?.weather_code;
+        const temp = Number(weather?.current?.temperature_2m);
+        const [text, emoji] = WEATHER_CODE_MAP[code] || ['未知', '🌡️'];
+        const data = {
+            city: cityName,
+            temp: Number.isFinite(temp) ? Math.round(temp) : null,
+            text,
+            emoji,
+            code: Number.isFinite(Number(code)) ? Number(code) : null,
+        };
+        weatherCache.set(key, { at: Date.now(), data });
+        const diskCache = readWeatherDiskCache();
+        diskCache[key] = { at: Date.now(), data };
+        writeWeatherDiskCache(diskCache);
+        return data;
+    } catch (error) {
+        console.log('[weather] 获取天气失败:', error && error.message ? error.message : error);
+        // 优先回落到上次成功数据；只有从未成功过才显示不可用
+        const stale = readWeatherDiskCache()[key];
+        if (stale && stale.data) return Object.assign({ stale: true }, stale.data);
+        return { error: true };
+    }
+})
+
+// ===== 地震速报：聚合中国地震台网正式测定（wolfx 镜像），渲染进程每分钟轮询，
+//       由渲染层按震级/时间/已通知 ID 自行过滤去重 =====
+let quakeCache = null; // { at, list }
+const QUAKE_TTL = 60 * 1000;
+
+function parseBeijingEpoch(text) {
+    const m = String(text || '').match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})$/);
+    if (!m) return null;
+    // 源数据为北京时间（UTC+8），减 8 小时得到 UTC，Date.UTC 自动处理跨日
+    return Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4] - 8, +m[5], +m[6]);
+}
+
+ipcMain.handle('get-earthquakes', async () => {
+    if (quakeCache && Date.now() - quakeCache.at < QUAKE_TTL) return quakeCache.list;
+    try {
+        const json = await fetchWeatherJson('https://api.wolfx.jp/cenc_eqlist.json');
+        const list = Object.keys(json)
+            .filter((k) => /^No\d+$/.test(k))
+            .map((k) => {
+                const ev = json[k] || {};
+                const magnitude = parseFloat(ev.magnitude);
+                const depth = parseFloat(ev.depth);
+                return {
+                    id: String(ev.EventID || ''),
+                    type: String(ev.type || ''),           // reviewed=正式测定 automatic=自动测定
+                    location: String(ev.location || ''),
+                    magnitude: Number.isFinite(magnitude) ? magnitude : null,
+                    depth: Number.isFinite(depth) ? depth : null,
+                    time: String(ev.time || ''),
+                    epochMs: parseBeijingEpoch(ev.time),
+                };
+            })
+            .filter((ev) => ev.id && ev.epochMs !== null && ev.magnitude !== null);
+        quakeCache = { at: Date.now(), list };
+        return list;
+    } catch (error) {
+        console.log('[quake] 获取地震速报失败:', error && error.message ? error.message : error);
+        // 失败时允许渲染层继续使用不超过 5 分钟的陈旧缓存，再旧则报错
+        if (quakeCache && Date.now() - quakeCache.at < 5 * 60 * 1000) return quakeCache.list;
+        return { error: true };
+    }
+})
 
 ipcMain.on('log', (e, arg) => {
     console.log(arg);
@@ -719,6 +1054,125 @@ ipcMain.on('reminder-trigger', (e, payload) => {
         win.webContents.send('reminder-trigger', payload || {});
     }
 })
+
+// ===== 全屏提醒：独立的透明无边框置顶窗口（主窗口在 top 模式下只有顶部一条，
+//       无法承载全屏遮罩） =====
+let reminderWin = undefined;
+let reminderWinReady = false;
+let reminderCloseTimer = null;
+
+function ensureReminderWindow() {
+    if (reminderWin && !reminderWin.isDestroyed()) return reminderWin;
+    reminderWinReady = false;
+    const display = screen.getPrimaryDisplay();
+    const bounds = display.bounds;
+    reminderWin = new BrowserWindow({
+        x: bounds.x,
+        y: bounds.y,
+        width: bounds.width,
+        height: bounds.height,
+        frame: false,
+        transparent: true,
+        resizable: false,
+        movable: false,
+        minimizable: false,
+        maximizable: false,
+        fullscreenable: false,
+        skipTaskbar: true,
+        show: false,
+        hasShadow: false,
+        alwaysOnTop: true,
+        webPreferences: {
+            nodeIntegration: true,
+            contextIsolation: false,
+            backgroundThrottling: false
+        }
+    });
+    reminderWin.setAlwaysOnTop(true, 'screen-saver', 9999999999999);
+    reminderWin.loadFile('reminder.html');
+    reminderWin.once('ready-to-show', () => reminderWinReady = true);
+    reminderWin.webContents.on('did-finish-load', () => {
+        reminderWinReady = true;
+        // 光效层只看不可点：整窗鼠标穿透，不阻挡用户正常操作
+        if (reminderWin && !reminderWin.isDestroyed()) reminderWin.setIgnoreMouseEvents(true);
+    });
+    reminderWin.on('closed', () => {
+        reminderWin = undefined;
+        reminderWinReady = false;
+    });
+    return reminderWin;
+}
+
+// 遮罩被提前关闭时：通知光效从当前状态快速淡出，随后隐藏窗口
+function hideFullscreenReminder() {
+    clearTimeout(reminderCloseTimer);
+    if (!reminderWin || reminderWin.isDestroyed()) return;
+    try { reminderWin.webContents.send('reminder-glow-hide'); } catch { /* 窗口尚未加载完成 */ }
+    reminderCloseTimer = setTimeout(() => {
+        if (reminderWin && !reminderWin.isDestroyed()) reminderWin.hide();
+    }, 300);
+}
+
+// 光效固定播放时长：1 秒扩散+渐隐动画，与提醒时长无关
+const REMINDER_GLOW_MS = 1000;
+
+function showFullscreenReminder(payload) {
+    const data = payload || {};
+    const rw = ensureReminderWindow();
+    clearTimeout(reminderCloseTimer);
+    // 扩散原点：渲染层给出的课表条中心（主窗口客户区 DIP）换算成光效窗坐标
+    const dispBounds = screen.getPrimaryDisplay().bounds;
+    const winBounds = (win && !win.isDestroyed()) ? win.getBounds() : { x: dispBounds.x, y: dispBounds.y };
+    const originX = Number(data.originX);
+    const originY = Number(data.originY);
+    const glowData = Object.assign({}, data);
+    if (Number.isFinite(originX) && Number.isFinite(originY)) {
+        glowData.originX = winBounds.x - dispBounds.x + originX;
+        glowData.originY = winBounds.y - dispBounds.y + originY;
+    }
+    const push = () => rw.webContents.send('reminder-data', glowData);
+    if (reminderWinReady) push();
+    else rw.webContents.once('did-finish-load', push);
+    if (!rw.isVisible()) rw.showInactive();
+    rw.setAlwaysOnTop(true, 'screen-saver', 9999999999999);
+    // show 后部分系统会重置穿透状态，重新断言一次
+    rw.setIgnoreMouseEvents(true);
+    // 1 秒动画播完（终点即全透明）后直接隐藏，不再绑定提醒时长
+    reminderCloseTimer = setTimeout(() => {
+        if (reminderWin && !reminderWin.isDestroyed()) reminderWin.hide();
+    }, REMINDER_GLOW_MS + 60);
+}
+
+ipcMain.on('reminder-fullscreen', (e, payload) => showFullscreenReminder(payload));
+ipcMain.on('reminder-fullscreen-close', hideFullscreenReminder);
+
+// ===== 提醒期间临时置顶主窗口，结束后按原设置恢复 =====
+let reminderPinTimer = null;
+ipcMain.on('reminder-pin', (e, arg) => {
+    if (!win || win.isDestroyed()) return;
+    win.setAlwaysOnTop(true, 'screen-saver', 9999999999999);
+    clearTimeout(reminderPinTimer);
+    const duration = Number(arg && arg.duration);
+    const ms = Number.isFinite(duration) && duration > 0 ? duration : 5000;
+    reminderPinTimer = setTimeout(() => {
+        if (win && !win.isDestroyed() && store.get('isWindowAlwaysOnTop', true)) {
+            win.setAlwaysOnTop(true, 'screen-saver', 9999999999999);
+        } else if (win && !win.isDestroyed()) {
+            win.setAlwaysOnTop(false);
+        }
+    }, ms + 1200);
+});
+
+// 自定义提醒音效文件选择
+ipcMain.handle('select-reminder-sound', async () => {
+    const result = await dialog.showOpenDialog({
+        title: '选择提醒音效',
+        properties: ['openFile'],
+        filters: [{ name: '音频文件', extensions: ['mp3', 'wav', 'ogg', 'm4a', 'flac', 'aac'] }]
+    });
+    if (result.canceled || !result.filePaths || !result.filePaths.length) return '';
+    return result.filePaths[0];
+});
 
 ipcMain.on('window-control', (event, action) => {
     const targetWindow = BrowserWindow.fromWebContents(event.sender);
@@ -801,10 +1255,8 @@ ipcMain.on('dialog', (e, arg) => {
         resizable: true,
         minimizable: true,
         maximizable: true,
-        modal: true,
         show: false,
         title: safePayload.title,
-        parent: win,
         webPreferences: {
             nodeIntegration: true,
             contextIsolation: false,
@@ -998,8 +1450,25 @@ ipcMain.on('open-theme-folder', async () => {
 })
 
 ipcMain.on('pop', (e, arg) => {
-    tray.popUpContextMenu(form)
+    openTrayMenu()
 })
+
+// 创建桌面快捷方式
+ipcMain.handle('create-desktop-shortcut', async () => {
+    const desktopPath = app.getPath('desktop');
+    const shortcutPath = path.join(desktopPath, 'eSchedule.lnk');
+    const iconPath = path.join(__dirname, 'image', 'icon.ico');
+    return new Promise((resolve) => {
+        createShortcut.create(shortcutPath, buildShortcutOptions(iconPath), (err) => {
+            if (err) {
+                console.error('创建桌面快捷方式失败:', err);
+                resolve(false);
+            } else {
+                resolve(true);
+            }
+        });
+    });
+});
 
 ipcMain.on('course-fusion-result', (event, fusion) => {
     if (win && !win.isDestroyed()) win.webContents.send('courseFusion', fusion || null);
