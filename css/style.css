@@ -38,13 +38,22 @@
     --col-left: rgb(0, 238, 255);
     --col-divider: #aaa;
     --bg-base: rgba(0, 0, 0, var(--global-bg-opacity));
+    /* 语义字体槽位：主题包可在 :root 覆盖这些变量来替换各区域字体。
+       --font-mono  倒计时数字 / 自定义文本 / 提醒文字
+       --font-base  课表条默认文字
+       --font-bold  当前课程名 / 展开课程名 / 角落星期
+       --font-serif 左右侧栏的节次与时间 */
+    --font-mono: JETB;
+    --font-base: YouYuan;
+    --font-bold: Sou;
+    --font-serif: Ali;
 }
 
 [data-theme="light"] {
     --col-text: #1a1a1a;
     --col-current: #0a7d0a;
     --col-break: #b8860b;
-    --col-ended: #888;
+    --col-ended: #555555;
     --col-right: #c0392b;
     --col-left: #0277bd;
     --col-divider: #ccc;
@@ -60,7 +69,7 @@
 }
 
 .classContainer {
-    font-family: YouYuan;
+    font-family: var(--font-base);
     position: relative;
     display: flex;
     flex-direction: row;
@@ -179,12 +188,18 @@ body.position-switching .miniCountdown {
     margin: 4px 0;
 }
 
-/* right 模式下展开的课程/课间格子改为纵向排列（全称在上，倒计时在下） */
+/* right 模式下展开的课程/课间格子改为纵向排列（全称在上，倒计时在下）；
+   display:flex + align-self:stretch 使格子占满 classContainer 内容区，
+   让进度条负边距能跨越 padding 达到课表组件全宽 */
 [data-position="right"] .classContainer .currentClassExpanded,
 [data-position="right"] .classContainer .breakClassExpanded {
+    display: flex;
     flex-direction: column;
     align-items: center;
+    align-self: stretch;
     gap: 2px;
+    margin: 0;
+    padding-bottom: 0;
 }
 
 .scheduleComponent {
@@ -205,6 +220,10 @@ body.position-switching .miniCountdown {
     align-items: baseline;
     gap: 8px;
     white-space: nowrap;
+    position: relative;
+    /* 进度条改为绝对定位，不参与 flex 流，避免在窄容器中
+       倒计时被挤到课程名称下方换行 */
+    padding-bottom: 4px;
 }
 
 .breakClassExpanded {
@@ -212,6 +231,8 @@ body.position-switching .miniCountdown {
     align-items: baseline;
     gap: 8px;
     white-space: nowrap;
+    position: relative;
+    padding-bottom: 4px;
     color: var(--col-break);
 }
 
@@ -260,14 +281,47 @@ body.position-switching .miniCountdown {
 }
 
 .expandedClassName {
-    font-family: Sou;
+    font-family: var(--font-bold);
     font-weight: bold;
 }
 
 .inlineCountdown {
     color: var(--col-text);
-    font-family: JETB;
+    font-family: var(--font-mono);
     font-size: var(--countdown-font-size);
+}
+
+/* 课表格子内联倒计时进度条：横排模式下绝对定位在展开格子底部，
+   宽度=展开格子宽度（=课程名称+倒计时宽度之和） */
+.inlineProgress {
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    height: 3px;
+    border-radius: 2px;
+    background: rgba(128, 128, 128, 0.25);
+    overflow: hidden;
+}
+
+.inlineProgress i {
+    display: block;
+    height: 100%;
+    width: 0;
+    border-radius: 2px;
+    background: var(--col-current);
+    transition: width 0.3s linear;
+}
+
+/* right 竖排模式：进度条用负边距跨越 classContainer 的 padding，
+   宽度=课表组件宽度而非仅对齐课程名。padding 值由 JS 动态写入 --cc-padding-x */
+[data-position="right"] .inlineProgress {
+    position: static;
+    flex: 0 0 auto;
+    width: calc(100% + 2 * var(--cc-padding-x, 14px));
+    margin-left: calc(-1 * var(--cc-padding-x, 14px));
+    margin-right: calc(-1 * var(--cc-padding-x, 14px));
+    margin-top: 2px;
 }
 
 .ended {
@@ -299,7 +353,7 @@ body.position-switching .miniCountdown {
     /* height: 100%; */
     position: absolute;
     top: 0;
-    font-family: Ali;
+    font-family: var(--font-serif);
     position: relative;
     transform: none;
 }
@@ -309,13 +363,49 @@ body.position-switching .miniCountdown {
     color: var(--col-right);
 }
 
+/* 倒计日期组件的可选进度条（起始日 → 终止日） */
+.dateProgress {
+    display: block;
+    width: 100%;
+    height: 3px;
+    margin-top: 3px;
+    border-radius: 2px;
+    background: rgba(128, 128, 128, 0.25);
+    overflow: hidden;
+}
+
+.dateProgress i {
+    display: block;
+    height: 100%;
+    width: 0;
+    border-radius: 2px;
+    background: var(--col-right);
+    transition: width 0.4s ease;
+}
+
 .timeSidebar {
     color: var(--col-text);
 }
 
+.weatherSidebar {
+    color: var(--col-text);
+}
+
+.weatherLine {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    white-space: nowrap;
+}
+
+.weatherEmoji {
+    font-family: "Segoe UI Emoji", "Apple Color Emoji", sans-serif;
+    line-height: 1;
+}
+
 .customText {
     color: var(--col-text);
-    font-family: JETB;
+    font-family: var(--font-mono);
     font-size: var(--center-font-size);
 }
 
@@ -328,7 +418,7 @@ body.position-switching .miniCountdown {
     display: inline;
     font-size: var(--corner-font-size);
     color: var(--col-text);
-    font-family: Sou;
+    font-family: var(--font-bold);
 }
 
 .countdownContainer {
@@ -358,7 +448,7 @@ body.position-switching .miniCountdown {
 .currentClass {
     color: var(--col-current);
     display: inline;
-    font-family: Sou;
+    font-family: var(--font-bold);
     transition: all 2s;
     font-weight: bold;
 }
@@ -366,7 +456,43 @@ body.position-switching .miniCountdown {
 .countdown {
     color: var(--col-text);
     display: inline;
-    font-family: JETB;
+    font-family: var(--font-mono);
+}
+
+/* 悬浮倒计时框内的时间段进度条 */
+.countdownProgress {
+    margin-top: 4px;
+    height: 4px;
+    border-radius: 2px;
+    background: rgba(128, 128, 128, 0.25);
+    overflow: hidden;
+}
+
+.countdownProgress i {
+    display: block;
+    height: 100%;
+    width: 0;
+    border-radius: 2px;
+    background: var(--col-current);
+    transition: width 0.3s linear;
+}
+
+/* “上课隐藏”时顶部小窗内的进度条 */
+.miniProgress {
+    height: 3px;
+    border-radius: 2px;
+    background: rgba(128, 128, 128, 0.25);
+    overflow: hidden;
+    margin-top: 3px;
+}
+
+.miniProgress i {
+    display: block;
+    height: 100%;
+    width: 0;
+    border-radius: 2px;
+    background: var(--col-current);
+    transition: width 0.3s linear;
 }
 
 .miniCountdown {
@@ -378,7 +504,7 @@ body.position-switching .miniCountdown {
     background-color: var(--bg-base);
     padding: var(--countdown-bg-padding);
     font-size: var(--countdown-font-size);
-    font-family: JETB;
+    font-family: var(--font-mono);
     color: var(--col-text);
     display: none;
 }
@@ -422,7 +548,7 @@ body.position-switching .miniCountdown {
 }
 
 .reminderText {
-    font-family: JETB, "Microsoft YaHei", sans-serif;
+    font-family: var(--font-mono), "Microsoft YaHei", sans-serif;
     font-size: var(--countdown-font-size, 25px);
     font-weight: 700;
     color: var(--col-text);

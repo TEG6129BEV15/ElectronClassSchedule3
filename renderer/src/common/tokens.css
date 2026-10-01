@@ -214,7 +214,7 @@ html, body {
 }
 
 body {
-  font-family: "Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
+  font-family: var(--font-app, "Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif);
   font-size: 14px;
   background: var(--bg);
   color: var(--text);

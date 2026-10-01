@@ -109,6 +109,7 @@ body {
   font-size: 28px;
   font-weight: 600;
   letter-spacing: -0.3px;
+  font-family: var(--font-app-title, inherit);
 }
 
 .page-header p,

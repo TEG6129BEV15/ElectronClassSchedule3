@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { Button, Input, Select } from '@fluentui/react-components';
 import { Svg, ICONS } from '../../common/icons.jsx';
 import { createCardId, timeToMinutes } from './config-utils.js';
+import { beginPointerGesture, createDragGhost } from '../../common/pointerDnd.js';
 
 // 计算每张“上课”卡片保存后的节次徽标
 function computeBadges(cards) {
@@ -41,6 +42,7 @@ function TimetableCard({
   onPointerDownHandle,
   onDragStart,
   onDragEnd,
+  onTouchDragHandle,
   onChange,
   onRemove,
 }) {
@@ -55,7 +57,10 @@ function TimetableCard({
       <span
         className="drag-handle"
         title="拖动调整顺序"
-        onPointerDown={onPointerDownHandle}
+        onPointerDown={(event) => {
+          onPointerDownHandle();
+          onTouchDragHandle?.(event);
+        }}
       >
         <Svg size={10} viewBox="0 0 10 16" html={ICONS.dragDots} strokeWidth={0} />
       </span>
@@ -173,12 +178,16 @@ function TimelineView({ cards, groupName, onAddClass, onAddBreak, onChangeCard, 
   // 放缩锚点：{ time, viewportY } —— 光标/视口中心对应的时刻放缩前后保持不动
   const anchorRef = useRef(null);
 
-  // 边缘拖拽状态：{ id, edge: 'start'|'end', value }（value 为吸附后的分钟数）
+  // 边缘拖拽状态：{ id, edge: 'start'|'end'|'move', value }（value 为吸附后的分钟数；
+  // move 模式下 value 表示新的开始时间，时长不变）
   const [drag, setDrag] = useState(null);
   const dragBaseRef = useRef(null);
   const dragRafRef = useRef(0);
   const dragClientYRef = useRef(0);
   const suppressClickRef = useRef(false);
+  // 整块平移：pointerdown 后先记录起点，位移超过阈值才判定为拖拽，
+  // 否则按点击处理（打开内联编辑浮层）
+  const movePendingRef = useRef(null);
 
   // 点击方块后的内联编辑器
   const [selectedId, setSelectedId] = useState(null);
@@ -191,8 +200,16 @@ function TimelineView({ cards, groupName, onAddClass, onAddBreak, onChangeCard, 
     let start = timeToMinutes(card.start);
     let end = timeToMinutes(card.end);
     if (drag && drag.id === card.id) {
-      if (drag.edge === 'start') start = drag.value;
-      else end = drag.value;
+      if (drag.edge === 'start') {
+        start = drag.value;
+      } else if (drag.edge === 'end') {
+        end = drag.value;
+      } else {
+        // 整块平移：时长保持不变，value 为吸附后的新开始分钟数
+        const duration = end - start;
+        start = drag.value;
+        end = drag.value + duration;
+      }
     }
     return { card, index, start, end, valid: start >= 0 && end >= 0 && end > start };
   });
@@ -259,7 +276,7 @@ function TimelineView({ cards, groupName, onAddClass, onAddBreak, onChangeCard, 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [rangeStart]);
 
-  // ===== 边缘拖拽改时间（5 分钟吸附） =====
+  // ===== 边缘拖拽改时间 / 整块平移（5 分钟吸附） =====
   const applyDragMove = () => {
     dragRafRef.current = 0;
     const base = dragBaseRef.current;
@@ -267,12 +284,17 @@ function TimelineView({ cards, groupName, onAddClass, onAddBreak, onChangeCard, 
     const card = cardsRef.current.find((item) => item.id === base.id);
     if (!card) return;
     const raw = base.baseMinutes + (dragClientYRef.current - base.startY) / ppmRef.current;
-    const other = base.edge === 'start' ? timeToMinutes(card.end) : timeToMinutes(card.start);
     let value = snapMinutes(raw);
-    if (base.edge === 'start') {
-      value = Math.min(Math.max(value, 0), other - MIN_SLOT_MINUTES);
+    if (base.edge === 'move') {
+      // 整块平移：钳制在 00:00 ~ 23:59 之内，时长保持不变
+      value = Math.min(Math.max(value, 0), DAY_MAX_MINUTES - base.baseDuration);
     } else {
-      value = Math.max(Math.min(value, DAY_MAX_MINUTES), other + MIN_SLOT_MINUTES);
+      const other = base.edge === 'start' ? timeToMinutes(card.end) : timeToMinutes(card.start);
+      if (base.edge === 'start') {
+        value = Math.min(Math.max(value, 0), other - MIN_SLOT_MINUTES);
+      } else {
+        value = Math.max(Math.min(value, DAY_MAX_MINUTES), other + MIN_SLOT_MINUTES);
+      }
     }
     base.latestValue = value;
     setDrag((prev) => (prev ? { ...prev, value } : prev));
@@ -295,6 +317,55 @@ function TimelineView({ cards, groupName, onAddClass, onAddBreak, onChangeCard, 
     if (!dragRafRef.current) dragRafRef.current = requestAnimationFrame(applyDragMove);
   };
 
+  // 按下方块主体（边缘手柄已 stopPropagation，不会进入这里）
+  const startBlockMove = (event, item) => {
+    if (event.pointerType === 'mouse' && event.button !== 0) return;
+    movePendingRef.current = {
+      id: item.card.id,
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      baseStart: item.start,
+      duration: item.end - item.start,
+      active: false,
+    };
+  };
+
+  const onBlockMove = (event) => {
+    const pending = movePendingRef.current;
+    if (!pending || pending.pointerId !== event.pointerId) return;
+    if (!pending.active) {
+      const MOVE_THRESHOLD = 5;
+      if (Math.abs(event.clientY - pending.startY) < MOVE_THRESHOLD
+        && Math.abs(event.clientX - pending.startX) < MOVE_THRESHOLD) {
+        return;
+      }
+      pending.active = true;
+      dragBaseRef.current = {
+        id: pending.id,
+        edge: 'move',
+        baseMinutes: pending.baseStart,
+        baseDuration: pending.duration,
+        startY: pending.startY,
+        latestValue: pending.baseStart,
+      };
+      dragClientYRef.current = pending.startY;
+      setDrag({ id: pending.id, edge: 'move', value: pending.baseStart });
+      const block = blockRefs.current.get(pending.id);
+      try { block?.setPointerCapture(event.pointerId); } catch (error) { /* 忽略 */ }
+    }
+    event.preventDefault();
+    dragClientYRef.current = event.clientY;
+    if (!dragRafRef.current) dragRafRef.current = requestAnimationFrame(applyDragMove);
+  };
+
+  const finishBlockMove = (event) => {
+    const pending = movePendingRef.current;
+    if (!pending || pending.pointerId !== event.pointerId) return;
+    movePendingRef.current = null;
+    if (pending.active) finishResize();
+  };
+
   const finishResize = () => {
     const base = dragBaseRef.current;
     if (dragRafRef.current) {
@@ -304,9 +375,17 @@ function TimelineView({ cards, groupName, onAddClass, onAddBreak, onChangeCard, 
     dragBaseRef.current = null;
     setDrag(null);
     if (base && Number.isFinite(base.latestValue) && base.latestValue !== base.baseMinutes) {
-      const patch = base.edge === 'start'
-        ? { start: minutesToTimeText(base.latestValue) }
-        : { end: minutesToTimeText(base.latestValue) };
+      let patch;
+      if (base.edge === 'move') {
+        patch = {
+          start: minutesToTimeText(base.latestValue),
+          end: minutesToTimeText(base.latestValue + base.baseDuration),
+        };
+      } else {
+        patch = base.edge === 'start'
+          ? { start: minutesToTimeText(base.latestValue) }
+          : { end: minutesToTimeText(base.latestValue) };
+      }
       onChangeCard(base.id, patch);
     }
     // 拖拽松手合成的 click 不要再打开编辑浮层
@@ -427,7 +506,7 @@ function TimelineView({ cards, groupName, onAddClass, onAddBreak, onChangeCard, 
           <span className="timeline-hint">{invalidCount} 个时间段时间无效，未在时间线中显示</span>
         )}
       </div>
-      <p className="timeline-tip">拖动方块上/下边缘修改时间（自动对齐 5 分钟）；点击方块编辑时间与类型；Ctrl + 滚轮（或 +/- 键）纵向放缩。</p>
+      <p className="timeline-tip">拖动方块中间可整体移动时间段，拖动上/下边缘修改时间（自动对齐 5 分钟，支持触屏）；点击方块编辑时间与类型；Ctrl + 滚轮（或 +/- 键）纵向放缩。</p>
       <div className={`timeline-scroll${drag ? ' dragging' : ''}`} ref={scrollRef}>
         {validItems.length === 0 ? (
           <div className="empty">暂无可显示的时间段，点击上方“上课 / 课间”添加。</div>
@@ -449,8 +528,12 @@ function TimelineView({ cards, groupName, onAddClass, onAddBreak, onChangeCard, 
                   }}
                   className={`timeline-block ${item.card.type}${compact ? ' compact' : ''}${isDragging ? ' dragging' : ''}${selectedId === item.card.id ? ' selected' : ''}`}
                   style={{ top: `${top}px`, height: `${height}px` }}
-                  title="点击编辑该时间段"
+                  title="点击编辑该时间段，拖动可整体移动"
                   onClick={() => openEditor(item.card)}
+                  onPointerDown={(event) => startBlockMove(event, item)}
+                  onPointerMove={onBlockMove}
+                  onPointerUp={finishBlockMove}
+                  onPointerCancel={finishBlockMove}
                 >
                   <span
                     className="timeline-resize-handle top"
@@ -568,6 +651,12 @@ export default function TimetablePage({
   const cardRef = useRef(null);
   const listRef = useRef(null);
   const [dragId, setDragId] = useState(null);
+  // 触屏手势生命周期跨越多次渲染，回调闭包里只能通过 ref 读取最新列表/拖拽 id
+  const cardsRef = useRef(cards);
+  cardsRef.current = cards;
+  const dragIdRef = useRef(null);
+  const cardTouchGhost = useRef(null);
+  const cardTouchGesture = useRef(null);
   // 时间表右侧两个独立子页：时间段列表 / 图形化时间线（偏好持久化）
   const [subView, setSubViewState] = useState(() => (
     localStorage.getItem('timetableSubView') === 'timeline' ? 'timeline' : 'list'
@@ -654,6 +743,64 @@ export default function TimetablePage({
     } else {
       moveBefore(targetIndex + 1);
     }
+  };
+
+  // 触屏拖拽卡片排序：HTML5 DnD 在触屏下不触发，用 pointer 手势实时重排
+  const moveCardToIndex = (targetIndex, liveCards, activeId) => {
+    if (!activeId) return;
+    const from = liveCards.findIndex((card) => card.id === activeId);
+    if (from < 0 || from === targetIndex) return;
+    const next = [...liveCards];
+    const [moved] = next.splice(from, 1);
+    const insertAt = from < targetIndex ? targetIndex - 1 : targetIndex;
+    next.splice(insertAt, 0, moved);
+    onCardsChange(next);
+  };
+
+  const reorderCardAtPoint = (x, y) => {
+    const list = listRef.current;
+    if (!list) return;
+    const liveCards = cardsRef.current;
+    const activeId = dragIdRef.current;
+    const hitEl = document.elementFromPoint(x, y);
+    const targetCard = hitEl?.closest?.('[data-card-index]');
+    if (!targetCard || !list.contains(targetCard)) {
+      if (hitEl && list.contains(hitEl)) moveCardToIndex(liveCards.length, liveCards, activeId);
+      return;
+    }
+    const rect = targetCard.getBoundingClientRect();
+    const targetIndex = Number(targetCard.dataset.cardIndex);
+    if (y < rect.top + rect.height / 2) moveCardToIndex(targetIndex, liveCards, activeId);
+    else moveCardToIndex(targetIndex + 1, liveCards, activeId);
+  };
+
+  const onTouchDragCard = (event, card) => {
+    if (event.pointerType === 'mouse') return;
+    const sourceEl = event.currentTarget.closest('.timetable-card');
+    if (!sourceEl) return;
+    const gesture = beginPointerGesture(event, {
+      threshold: 8,
+      onActivate: ({ x, y }) => {
+        dragIdRef.current = card.id;
+        setDragId(card.id);
+        sourceEl.classList.add('touch-dragging');
+        cardTouchGhost.current = createDragGhost(sourceEl);
+        cardTouchGhost.current.move(x, y);
+        reorderCardAtPoint(x, y);
+      },
+      onMove: ({ x, y }) => {
+        cardTouchGhost.current?.move(x, y);
+        reorderCardAtPoint(x, y);
+      },
+      onEnd: () => {
+        sourceEl.classList.remove('touch-dragging');
+        cardTouchGhost.current?.dispose();
+        cardTouchGhost.current = null;
+        dragIdRef.current = null;
+        setDragId(null);
+      },
+    });
+    if (gesture) cardTouchGesture.current = gesture;
   };
 
   // 与旧版 applyTimetableLayout 相同的宽度钳制
@@ -782,6 +929,7 @@ export default function TimetablePage({
                         invalid={invalidIndexes.has(index)}
                         draggableEnabled={dragId === card.id}
                         onPointerDownHandle={() => setDragId(card.id)}
+                        onTouchDragHandle={(event) => onTouchDragCard(event, card)}
                         onDragStart={(event) => {
                           event.dataTransfer.effectAllowed = 'move';
                           try { event.dataTransfer.setData('text/plain', ''); } catch (error) { /* 忽略 */ }

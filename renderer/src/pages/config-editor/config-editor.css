@@ -231,6 +231,8 @@
   color: var(--muted);
   cursor: grab;
   border-radius: 4px;
+  /* 触屏拖拽时阻止纵向滚动，确保 pointermove 持续送达 */
+  touch-action: none;
 }
 
 .drag-handle:active { cursor: grabbing; }
@@ -238,6 +240,12 @@
 .drag-handle svg {
   width: 10px;
   height: 16px;
+}
+
+/* 触屏拖拽中的源卡片：让出命中，使手指下方始终能检测到目标卡片 */
+.timetable-card.touch-dragging {
+  opacity: 0.45;
+  pointer-events: none;
 }
 
 .timetable-type-select.fui-Select {
@@ -684,6 +692,13 @@
   cursor: pointer;
   border: 1px solid transparent;
   transition: filter 0.12s ease, box-shadow 0.12s ease;
+  /* 始终建立层叠上下文（z-index 为整数）：
+     否则未悬停块不产生层叠上下文，其外扩手柄的 z-index:1 会直接参与
+     画布层级排序，越过悬停块（filter 产生的 z:auto 上下文），
+     在相邻两块的边界处互抢命中，造成两块交替闪烁。 */
+  z-index: 1;
+  /* 触屏拖拽（整块移动 / 边缘改时长）时阻止浏览器纵向滚动 */
+  touch-action: none;
 }
 
 /* 内层负责裁剪文字；块本身不裁剪，好让上下手柄伸出边缘 */
@@ -699,19 +714,28 @@
 .timeline-block:hover {
   filter: brightness(0.97);
   box-shadow: 0 0 0 1px var(--accent);
+  /* 悬停块整体抬到相邻块之上，其外扩手柄稳定获得边界处命中，
+     不再与相邻块互相翻转 hover 状态 */
+  z-index: 3;
 }
 
 .timeline-block.selected {
   box-shadow: 0 0 0 2px var(--accent);
+  z-index: 3;
 }
 
 .timeline-block.dragging {
   filter: brightness(1.02);
   box-shadow: 0 2px 8px var(--shadow);
-  z-index: 5;
+  z-index: 4;
+  cursor: grabbing;
 }
 
-/* 上下边缘拖拽手柄（加大命中区域，视觉上仅显示一条细线） */
+/* 上下边缘拖拽手柄（加大命中区域，视觉上仅显示一条细线）。
+   手柄始终存在于块内部（块已统一建立层叠上下文）。
+   默认不参与命中：相邻两块外扩 5px 的手柄会重叠，若一直可命中，
+   后渲染块的手柄会越过边界抢走悬停；改为仅悬停/拖拽中的块启用，
+   使悬停归属与指针几何位置一致。 */
 .timeline-resize-handle {
   position: absolute;
   left: 0;
@@ -719,12 +743,12 @@
   height: 10px;
   cursor: ns-resize;
   z-index: 1;
+  pointer-events: none;
 }
 
-/* 悬停或拖拽中的块，手柄抬到相邻块之上，避免边缘重叠时互相遮挡 */
 .timeline-block:hover .timeline-resize-handle,
 .timeline-block.dragging .timeline-resize-handle {
-  z-index: 6;
+  pointer-events: auto;
 }
 
 .timeline-resize-handle.top { top: -5px; }

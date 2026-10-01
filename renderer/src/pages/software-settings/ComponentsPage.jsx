@@ -1,6 +1,7 @@
 import { useRef, useState } from 'react';
 import { Button, Checkbox, Input, Select } from '@fluentui/react-components';
 import { Svg, ICONS } from '../../common/icons.jsx';
+import { beginPointerGesture, createDragGhost } from '../../common/pointerDnd.js';
 
 export const COMPONENT_LABELS = {
   schedule: '课表',
@@ -8,6 +9,7 @@ export const COMPONENT_LABELS = {
   date: '日期',
   countdown: '倒计日期',
   time: '时间',
+  weather: '天气',
   customText: '自定义文本',
 };
 
@@ -17,6 +19,7 @@ const COMPONENT_DESCRIPTIONS = {
   date: '当前日期和星期',
   countdown: '目标日期倒计时',
   time: '当前时间',
+  weather: '当前位置气温与天气',
   customText: '自定义显示文本',
 };
 
@@ -26,6 +29,7 @@ const COMPONENT_ICONS = {
   date: ICONS.componentDate,
   countdown: ICONS.componentCountdown,
   time: ICONS.componentTime,
+  weather: ICONS.componentWeather,
   customText: ICONS.componentCustomText,
 };
 
@@ -71,8 +75,9 @@ export function getConfiguredComponentRows(settings, config) {
 function buildNewComponent(type, settings) {
   const component = { id: createComponentId(type), type, options: {} };
   if (type === 'week') component.options = { display: true };
-  if (type === 'countdown') component.options = { mode: 'date', target: '' };
+  if (type === 'countdown') component.options = { mode: 'date', target: '', start: '', showProgress: true };
   if (type === 'time') component.options = { source: 'offset' };
+  if (type === 'weather') component.options = { city: '' };
   if (type === 'customText') component.options = { text: settings?.custom_text || '' };
   return component;
 }
@@ -90,6 +95,10 @@ export default function ComponentsPage({
   const [draggingId, setDraggingId] = useState(null);
   const [overOrder, setOverOrder] = useState(null);
   const [overRow, setOverRow] = useState(null);
+  // 触屏手势通道（HTML5 DnD 在触屏下不触发）
+  const gestureRef = useRef(null);
+  const ghostRef = useRef(null);
+  const suppressTapRef = useRef(false);
 
   const commitRows = (nextRows) => {
     settingsRef.current.component_layout = nextRows;
@@ -106,7 +115,7 @@ export default function ComponentsPage({
     return null;
   };
 
-  // 将组件插入到目标行的指定位置（按鼠标 X 与目标 chip 中点比较）
+  // 将组件插入到目标行的指定位置（按指针 X 与目标 chip 中点比较）
   const insertComponent = (componentIdOrObj, targetRowIndex, event) => {
     const sourceRows = rows.map((row) => [...row]);
     let component;
@@ -143,6 +152,142 @@ export default function ComponentsPage({
     setOverRow(null);
   };
 
+  // ===== 触屏（Pointer Events）拖拽：命中检测与落点逻辑 =====
+  const orderRowFromPoint = (x, y) => {
+    const hitEl = document.elementFromPoint(x, y);
+    const orderEl = hitEl?.closest?.('.component-order');
+    if (!orderEl) return null;
+    return { orderEl, rowIndex: Number(orderEl.dataset.rowIndex), hitEl };
+  };
+
+  const rowFromPoint = (x, y) => {
+    const hitEl = document.elementFromPoint(x, y);
+    const rowEl = hitEl?.closest?.('.component-row');
+    if (!rowEl) return null;
+    return { rowEl, rowIndex: Number(rowEl.dataset.rowIndex), hitEl };
+  };
+
+  const dropComponentAt = (x, y) => {
+    const drag = dragRef.current;
+    if (!drag || drag.kind === 'row') return;
+    const hit = orderRowFromPoint(x, y);
+    if (!hit) return;
+    const fakeEvent = { target: hit.hitEl, clientX: x, preventDefault() {} };
+    if (drag.kind === 'library') {
+      insertComponent(buildNewComponent(drag.type, settingsRef.current), hit.rowIndex, fakeEvent);
+    } else {
+      insertComponent(drag.id, hit.rowIndex, fakeEvent);
+    }
+  };
+
+  const dropRowAt = (x, y) => {
+    const drag = dragRef.current;
+    if (!drag || drag.kind !== 'row') return;
+    const hit = rowFromPoint(x, y);
+    if (!hit || drag.index === hit.rowIndex) return;
+    const rect = hit.rowEl.getBoundingClientRect();
+    const insertBefore = y < rect.top + rect.height / 2;
+    const nextRows = rows.map((row) => [...row]);
+    const [moved] = nextRows.splice(drag.index, 1);
+    let destination = hit.rowIndex;
+    if (drag.index < hit.rowIndex) destination -= 1;
+    destination = insertBefore ? destination : destination + 1;
+    nextRows.splice(destination, 0, moved);
+    commitRows(nextRows);
+  };
+
+  const finishTouchGesture = (cancelTap = true) => {
+    gestureRef.current = null;
+    ghostRef.current?.dispose();
+    ghostRef.current = null;
+    clearDragState();
+    if (cancelTap) {
+      // 拖拽松手后浏览器可能仍合成一次 click，需抑制，避免误打开实例编辑器
+      suppressTapRef.current = true;
+      setTimeout(() => { suppressTapRef.current = false; }, 0);
+    }
+  };
+
+  // 已放置组件（chip）触屏拖动
+  const beginChipTouchDrag = (event, component) => {
+    if (event.pointerType === 'mouse') return;
+    if (event.target.closest?.('.chip-remove')) return;
+    const sourceEl = event.currentTarget;
+    const gesture = beginPointerGesture(event, {
+      onActivate: ({ x, y }) => {
+        dragRef.current = { kind: 'chip', id: component.id };
+        setDraggingId(component.id);
+        ghostRef.current = createDragGhost(sourceEl);
+        ghostRef.current.move(x, y);
+        const hit = orderRowFromPoint(x, y);
+        setOverOrder(hit ? hit.rowIndex : null);
+      },
+      onMove: ({ x, y }) => {
+        ghostRef.current?.move(x, y);
+        const hit = orderRowFromPoint(x, y);
+        setOverOrder((prev) => (prev === (hit ? hit.rowIndex : null) ? prev : (hit ? hit.rowIndex : null)));
+      },
+      onEnd: ({ x, y, canceled }) => {
+        if (!canceled) dropComponentAt(x, y);
+        finishTouchGesture();
+      },
+    });
+    if (gesture) gestureRef.current = gesture;
+  };
+
+  // 行标题触屏拖动（调整行顺序）
+  const beginRowTouchDrag = (event, rowIndex) => {
+    if (event.pointerType === 'mouse') return;
+    const sourceEl = event.currentTarget;
+    const gesture = beginPointerGesture(event, {
+      onActivate: ({ x, y }) => {
+        dragRef.current = { kind: 'row', index: rowIndex };
+        ghostRef.current = createDragGhost(sourceEl);
+        ghostRef.current.move(x, y);
+        const hit = rowFromPoint(x, y);
+        setOverRow(hit && hit.rowIndex !== rowIndex ? hit.rowIndex : null);
+      },
+      onMove: ({ x, y }) => {
+        ghostRef.current?.move(x, y);
+        const hit = rowFromPoint(x, y);
+        setOverRow(hit && hit.rowIndex !== rowIndex ? hit.rowIndex : null);
+      },
+      onEnd: ({ x, y, canceled }) => {
+        if (!canceled) dropRowAt(x, y);
+        finishTouchGesture(false);
+      },
+    });
+    if (gesture) gestureRef.current = gesture;
+  };
+
+  // 组件库卡片触屏拖动
+  const beginLibraryTouchDrag = (event, type) => {
+    if (event.pointerType === 'mouse') return;
+    const sourceEl = event.currentTarget;
+    const gesture = beginPointerGesture(event, {
+      onActivate: ({ x, y }) => {
+        dragRef.current = { kind: 'library', type };
+        sourceEl.classList.add('dragging');
+        ghostRef.current = createDragGhost(sourceEl);
+        ghostRef.current.move(x, y);
+        const hit = orderRowFromPoint(x, y);
+        setOverOrder(hit ? hit.rowIndex : null);
+      },
+      onMove: ({ x, y }) => {
+        ghostRef.current?.move(x, y);
+        const hit = orderRowFromPoint(x, y);
+        setOverOrder(hit ? hit.rowIndex : null);
+      },
+      onEnd: ({ x, y, canceled }) => {
+        sourceEl.classList.remove('dragging');
+        if (!canceled) dropComponentAt(x, y);
+        finishTouchGesture();
+      },
+    });
+    if (gesture) gestureRef.current = gesture;
+  };
+
+  // ===== 以下为鼠标（HTML5 Drag and Drop）通道，触屏不触发，保留原行为 =====
   const handleOrderDragOver = (event, rowIndex) => {
     const drag = dragRef.current;
     if (!drag) return;
@@ -180,8 +325,7 @@ export default function ComponentsPage({
     }
     event.preventDefault();
     const sourceIndex = drag.index;
-    const rowEl = event.currentTarget;
-    const rect = rowEl.getBoundingClientRect();
+    const rect = event.currentTarget.getBoundingClientRect();
     const insertBefore = event.clientY < rect.top + rect.height / 2;
     const nextRows = rows.map((row) => [...row]);
     const [moved] = nextRows.splice(sourceIndex, 1);
@@ -223,7 +367,15 @@ export default function ComponentsPage({
 
   const updateOption = (field, value) => {
     if (!selected) return;
-    selected.options[field] = value;
+    // 必须生成新的 rows 引用：父页面的防抖落盘 effect 依赖 rows 变化，
+    // 原地 mutate + bump() 只会重绘 UI，不会触发保存。
+    const nextRows = rows.map((row) => row.map((component) => (
+      component.id === selected.id
+        ? { ...component, options: { ...component.options, [field]: value } }
+        : component
+    )));
+    settingsRef.current.component_layout = nextRows;
+    setRows(nextRows);
     bump();
   };
 
@@ -240,6 +392,7 @@ export default function ComponentsPage({
           <div
             key={rowIndex}
             className={`component-row${overRow === rowIndex ? ' drag-over' : ''}`}
+            data-row-index={rowIndex}
             onDragOver={(event) => handleRowDragOver(event, rowIndex)}
             onDrop={(event) => handleRowDrop(event, rowIndex)}
           >
@@ -247,6 +400,7 @@ export default function ComponentsPage({
               className="component-row-title"
               draggable
               title="拖动调整行顺序"
+              onPointerDown={(event) => beginRowTouchDrag(event, rowIndex)}
               onDragStart={(event) => {
                 dragRef.current = { kind: 'row', index: rowIndex };
                 event.dataTransfer.effectAllowed = 'move';
@@ -258,6 +412,7 @@ export default function ComponentsPage({
             <div>
               <div
                 className={`component-order${overOrder === rowIndex ? ' drag-over' : ''}`}
+                data-row-index={rowIndex}
                 onDragOver={(event) => handleOrderDragOver(event, rowIndex)}
                 onDragLeave={(event) => {
                   if (overOrder === rowIndex && !event.currentTarget.contains(event.relatedTarget)) {
@@ -274,7 +429,11 @@ export default function ComponentsPage({
                     tabIndex={0}
                     data-component-id={component.id}
                     title="点击编辑，拖动调整组件顺序"
-                    onClick={() => setSelectedId(component.id)}
+                    onClick={() => {
+                      if (suppressTapRef.current) return;
+                      setSelectedId(component.id);
+                    }}
+                    onPointerDown={(event) => beginChipTouchDrag(event, component)}
                     onDragStart={(event) => {
                       dragRef.current = { kind: 'chip', id: component.id };
                       setDraggingId(component.id);
@@ -328,7 +487,13 @@ export default function ComponentsPage({
         onDragEnd={clearDragState}
       >
         {Object.keys(COMPONENT_LABELS).map((type) => (
-          <div key={type} className="component-library-card" draggable data-library-type={type}>
+          <div
+            key={type}
+            className="component-library-card"
+            draggable
+            data-library-type={type}
+            onPointerDown={(event) => beginLibraryTouchDrag(event, type)}
+          >
             <span className="component-type-icon">
               <Svg size={20} viewBox="0 0 20 20" html={COMPONENT_ICONS[type]} strokeWidth={1.4} />
             </span>
@@ -361,6 +526,17 @@ export default function ComponentsPage({
 
 function ComponentEditorFields({ component, onOption }) {
   const options = component.options || {};
+  if (component.type === 'schedule') {
+    return (
+      <label className="checkbox-row">
+        <Checkbox
+          checked={options.showProgress !== false}
+          onChange={(event, data) => onOption('showProgress', data.checked === true)}
+        />
+        <span>显示倒计时进度条（上课/课间时间段进度）</span>
+      </label>
+    );
+  }
   if (component.type === 'week') {
     return (
       <label className="checkbox-row">
@@ -375,12 +551,25 @@ function ComponentEditorFields({ component, onOption }) {
   if (component.type === 'countdown') {
     return (
       <div className="field">
-        <label>目标日期</label>
+        <label>起始日期</label>
+        <Input
+          type="date"
+          value={normalizeDateValue(options.start || '')}
+          onChange={(event) => onOption('start', event.target.value)}
+        />
+        <label>终止日期</label>
         <Input
           type="date"
           value={normalizeDateValue(options.target || '')}
           onChange={(event) => onOption('target', event.target.value)}
         />
+        <label className="checkbox-row" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <Checkbox
+            checked={options.showProgress === true}
+            onChange={(event, data) => onOption('showProgress', data.checked === true)}
+          />
+          <span>显示进度条（起始日 → 终止日）</span>
+        </label>
         <label>倒计时文字颜色</label>
         <input
           type="color"
@@ -402,6 +591,19 @@ function ComponentEditorFields({ component, onOption }) {
           <option value="offset">偏移时间</option>
           <option value="system">系统时间</option>
         </Select>
+      </div>
+    );
+  }
+  if (component.type === 'weather') {
+    return (
+      <div className="field">
+        <label>城市（留空则按网络自动定位）</label>
+        <Input
+          type="text"
+          placeholder="如：北京 / Shanghai"
+          value={String(options.city || '')}
+          onChange={(event) => onOption('city', event.target.value)}
+        />
       </div>
     );
   }

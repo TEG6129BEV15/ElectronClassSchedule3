@@ -66,14 +66,14 @@ export default function ThemePacksPage({ activeTheme, onSelectTheme }) {
                   }}
                 >
                   <div className="theme-pack-info">
-                    <div className="theme-pack-name">{pack.name}</div>
+                    <div className="theme-pack-name">{pack.id}</div>
                     <div className="theme-pack-meta">
-                      {pack.id} · {pack.css.length} 个样式文件 · {pack.fonts.length} 个字体
+                      {pack.css.length} 个样式文件 · {pack.fonts.length} 个字体
                     </div>
                   </div>
                   <Switch
                     checked={checked}
-                    aria-label={`启用主题 ${pack.name}`}
+                    aria-label={`启用主题 ${pack.id}`}
                     onChange={(_event, data) => onSelectTheme(data.checked ? pack.id : '')}
                     onClick={(event) => event.stopPropagation()}
                   />
