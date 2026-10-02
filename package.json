@@ -29,6 +29,7 @@
     "js-yaml": "^5.4.2",
     "mica-electron": "^1.5.17",
     "node-gyp": "^10.2.0",
-    "windows-shortcuts": "^0.1.6"
+    "windows-shortcuts": "^0.1.6",
+    "xlsx": "^0.18.5"
   }
 }

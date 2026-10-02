@@ -291,14 +291,121 @@ function isTimetableFinished(dayTimetable, currentTime) {
     return endTimes.length > 0 && currentSeconds >= Math.max(...endTimes);
 }
 
+// "HH:MM"（或 "HH:MM:SS"）→ 当天分钟数；无法解析返回 null
+function timeTextToMinutesOfDay(timeText) {
+    const match = /^(\d{1,2}):(\d{2})(?::(\d{2}))?$/.exec(String(timeText || '').trim());
+    if (!match) return null;
+    const hours = Number(match[1]);
+    const minutes = Number(match[2]);
+    if (hours > 23 || minutes > 59) return null;
+    return hours * 60 + minutes;
+}
+
+// 计算分割线在课程列表中的插入位置（0 基：返回 n 表示线插在第 n 节课之前，
+// 即已有 n 节课排列在线的上方）。
+// 规则：
+// - 时间点落在上课区间 [start, end) 内（含上课开始）→ 该节课之前（上一节课之后）；
+// - 时间点落在课间区间内（含课间开始，即上一节课的下课时刻）→ 上一节课之后；
+// - 时间点晚于所有时间段 → 最后一节课之后。
+// timetable 中的分割线为单点 key "HH:MM"、value 为 'divider'。
+// 兼容旧版独立 divider 数字数组：数字 n（0 基，0=第一节）→ 第 n 节课的下课时间。
+function computeDividerPositions(dayTimetable, legacyDivider) {
+    if (!dayTimetable || typeof dayTimetable !== 'object') return [];
+    const ranges = [];
+    const points = [];
+    Object.keys(dayTimetable).forEach((key) => {
+        const hyphenIndex = key.indexOf('-');
+        if (hyphenIndex === -1) {
+            if (dayTimetable[key] === 'divider') {
+                const point = timeTextToMinutesOfDay(key);
+                if (point !== null) points.push(point);
+            }
+            return;
+        }
+        const start = timeTextToMinutesOfDay(key.slice(0, hyphenIndex).trim());
+        const end = timeTextToMinutesOfDay(key.slice(hyphenIndex + 1).trim());
+        if (start === null || end === null || end <= start) return;
+        ranges.push({ start, end, isClass: typeof dayTimetable[key] === 'number' });
+    });
+    const classRanges = ranges.filter((range) => range.isClass)
+        .sort((a, b) => a.start - b.start);
+    // 旧版数字 divider：n → 第 n 节上课区间的下课时间
+    (Array.isArray(legacyDivider) ? legacyDivider : []).forEach((value) => {
+        const index = Number(value);
+        if (Number.isInteger(index) && index >= 0 && index < classRanges.length) {
+            points.push(classRanges[index].end);
+        }
+    });
+    if (!points.length) return [];
+    ranges.sort((a, b) => a.start - b.start);
+    const positions = points.map((point) => {
+        let passedClasses = 0;
+        for (const range of ranges) {
+            if (range.isClass) {
+                if (point >= range.end) {
+                    passedClasses += 1;
+                    continue;
+                }
+                // point 落在该节课开始之前或上课区间内：线在该节课之前
+                break;
+            }
+            // 课间：point 越过课间结束则继续；否则（课间开始前/课间内，
+            // 含上一节课的下课时刻）线停留在上一节课之后
+            if (point > range.end) continue;
+            break;
+        }
+        return passedClasses;
+    });
+    return [...new Set(positions)].sort((a, b) => a - b);
+}
+
+// 插件接口：当前节次标识。
+// 正在上课 → 当前节；课间/课外 → 即将开始的下一节；都取不到 → 当天兜底。
+// 用于“每节课只能抽取一次”这类按节次计数/去重的插件。
+function getCurrentPeriodKey() {
+    const dayConfig = getCurrentDayScheduleConfig();
+    const timetableName = dayConfig?.timetable || '';
+    const dayTimetable = timetableName ? scheduleConfig.timetable?.[timetableName] : null;
+    const nowSeconds = timeToSeconds(getCurrentTime());
+    let currentStart = null;
+    let nextStart = null;
+    if (dayTimetable) {
+        Object.keys(dayTimetable).forEach((key) => {
+            if (key.indexOf('-') === -1) return;
+            const [start, end] = key.split('-');
+            const startSeconds = timeToSeconds(start);
+            const endSeconds = timeToSeconds(end);
+            if (nowSeconds >= startSeconds && nowSeconds < endSeconds) {
+                currentStart = start;
+            } else if (startSeconds > nowSeconds
+                && (nextStart === null || startSeconds < timeToSeconds(nextStart))) {
+                nextStart = start;
+            }
+        });
+    }
+    const slotStart = currentStart || nextStart;
+    const date = getCurrentEditedDate();
+    const dateKey = [
+        date.getFullYear(),
+        String(date.getMonth() + 1).padStart(2, '0'),
+        String(date.getDate()).padStart(2, '0')
+    ].join('-');
+    return {
+        key: `${dateKey}#${slotStart || 'none'}`,
+        slotStart: slotStart || '',
+        isDuringClass: currentStart !== null
+    };
+}
+
 function getNextDayScheduleData() {
     const dayConfig = getCurrentDayScheduleConfig(1);
     const currentSchedule = getDaySchedule(1);
     const timetable = dayConfig?.timetable;
     const dayTimetable = timetable && scheduleConfig.timetable?.[timetable];
-    const divider = (scheduleConfig.divider?.[timetable] || [])
-        .map(position => Number(position) + 1)
-        .filter(position => Number.isInteger(position));
+    const divider = computeDividerPositions(
+        dayTimetable,
+        scheduleConfig.divider?.[timetable]
+    );
     return {
         scheduleArray: currentSchedule.length ? currentSchedule : [''],
         currentHighlight: {
@@ -349,12 +456,12 @@ function getScheduleData() {
     }
     const timetable = dayConfig.timetable;
     const dayTimetable = scheduleConfig.timetable[timetable];
-    const divider = (scheduleConfig.divider[timetable] || [])
-        .map(position => Number(position) + 1)
-        .filter(position => Number.isInteger(position));
+    const divider = computeDividerPositions(dayTimetable, scheduleConfig.divider?.[timetable]);
     let scheduleArray = [];
     let currentHighlight = { index: null, type: null, fullName: null, countdown: null, countdownText: null };
     Object.keys(dayTimetable).forEach((timeRange, index) => {
+        // 分割线是单点时间（key 不含 '-'），不参与课程/课间计算
+        if (timeRange.indexOf('-') === -1) return;
         const [startTime, endTime] = timeRange.split('-');
         const classIndex = dayTimetable[timeRange];
 

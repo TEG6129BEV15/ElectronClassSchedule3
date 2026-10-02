@@ -1,8 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { Button, Input, Select } from '@fluentui/react-components';
 import { Svg, ICONS } from '../../common/icons.jsx';
-import { createCardId, timeToMinutes } from './config-utils.js';
-import { beginPointerGesture, createDragGhost } from '../../common/pointerDnd.js';
+import { createCardId, minutesToTimeText, sortCardsByTime, timeToMinutes } from './config-utils.js';
 
 // 计算每张“上课”卡片保存后的节次徽标
 function computeBadges(cards) {
@@ -21,13 +20,6 @@ function computeBadges(cards) {
   return badges;
 }
 
-function minutesToTimeText(totalMinutes) {
-  const clamped = Math.max(0, Math.min(totalMinutes, 23 * 60 + 59));
-  const hours = Math.floor(clamped / 60);
-  const minutes = clamped % 60;
-  return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}`;
-}
-
 function parseDurationMinutes(value, fallback) {
   const parsed = parseInt(value, 10);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
@@ -38,64 +30,62 @@ function TimetableCard({
   index,
   badge,
   invalid,
-  draggableEnabled,
-  onPointerDownHandle,
-  onDragStart,
-  onDragEnd,
-  onTouchDragHandle,
   onChange,
   onRemove,
 }) {
   return (
     <div
-      className={`timetable-card${invalid ? ' invalid' : ''}`}
+      className={`timetable-card${card.type === 'divider' ? ' divider-card' : ''}${invalid ? ' invalid' : ''}`}
       data-card-index={index}
-      draggable={draggableEnabled}
-      onDragStart={onDragStart}
-      onDragEnd={onDragEnd}
     >
-      <span
-        className="drag-handle"
-        title="拖动调整顺序"
-        onPointerDown={(event) => {
-          onPointerDownHandle();
-          onTouchDragHandle?.(event);
-        }}
-      >
-        <Svg size={10} viewBox="0 0 10 16" html={ICONS.dragDots} strokeWidth={0} />
-      </span>
       <Select
         className="timetable-type-select"
         title="时间段类型"
         value={card.type}
         onChange={(event) => {
           const type = event.target.value;
-          onChange({
+          const patch = {
             type,
             name: type === 'break' && !String(card.name || '').trim() ? '课间' : card.name,
-          });
+          };
+          // 从分割线切回上课/课间且没有结束时间时，补一个默认结束时间
+          if (type !== 'divider' && !card.end) {
+            const startMinutes = timeToMinutes(card.start);
+            if (startMinutes >= 0) {
+              patch.end = minutesToTimeText(Math.min(
+                startMinutes + (type === 'class' ? 40 : 10),
+                23 * 60 + 59,
+              ));
+            }
+          }
+          onChange(patch);
         }}
       >
         <option value="class">上课</option>
         <option value="break">下课</option>
+        <option value="divider">分割线</option>
       </Select>
       <Input
         className="timetable-time"
         type="time"
         step="60"
-        title="开始时间"
+        title={card.type === 'divider' ? '分割线时间' : '开始时间'}
         value={card.start}
         onChange={(event) => onChange({ start: event.target.value })}
       />
-      <span className="range-sep">–</span>
-      <Input
-        className="timetable-time"
-        type="time"
-        step="60"
-        title="结束时间"
-        value={card.end}
-        onChange={(event) => onChange({ end: event.target.value })}
-      />
+      {card.type !== 'divider' && (
+        <>
+          <span className="range-sep">–</span>
+          <Input
+            className="timetable-time"
+            type="time"
+            step="60"
+            title="结束时间"
+            value={card.end}
+            onChange={(event) => onChange({ end: event.target.value })}
+          />
+        </>
+      )}
       {card.type === 'break' && (
         <Input
           className="break-name"
@@ -106,6 +96,9 @@ function TimetableCard({
       )}
       {card.type === 'class' && (
         <span className="class-badge" title={badge || ''}>{badge || ''}</span>
+      )}
+      {card.type === 'divider' && (
+        <span className="divider-mark" title="分割线"><i /></span>
       )}
       <Button
         className="win-icon danger-outline"
@@ -144,16 +137,20 @@ function tickStepFor(ppm) {
   return steps.find((step) => step * ppm >= 42) || 120;
 }
 
-function computeRange(items) {
+function computeRange(items, dividers) {
   const validItems = items.filter((item) => item.valid);
-  if (!validItems.length) return { rangeStart: 8 * 60, rangeEnd: 18 * 60 };
-  const rangeStart = Math.floor(Math.min(...validItems.map((item) => item.start)) / 60) * 60;
-  let rangeEnd = Math.ceil(Math.max(...validItems.map((item) => item.end)) / 60) * 60;
+  const validPoints = dividers.filter((item) => item.valid).map((item) => item.minutes);
+  if (!validItems.length && !validPoints.length) return { rangeStart: 8 * 60, rangeEnd: 18 * 60 };
+  const minCandidates = [...validItems.map((item) => item.start), ...validPoints];
+  // 分割线是单点：最大侧多取 1 分钟，保证线条不会恰好贴在画布底沿
+  const maxCandidates = [...validItems.map((item) => item.end), ...validPoints.map((point) => point + 1)];
+  const rangeStart = Math.floor(Math.min(...minCandidates) / 60) * 60;
+  let rangeEnd = Math.ceil(Math.max(...maxCandidates) / 60) * 60;
   if (rangeEnd <= rangeStart) rangeEnd = rangeStart + 60;
   return { rangeStart, rangeEnd };
 }
 
-function TimelineView({ cards, groupName, onAddClass, onAddBreak, onChangeCard, onRemoveCard }) {
+function TimelineView({ cards, groupName, onAddClass, onAddBreak, onAddDivider, onChangeCard, onPatchCards, onRemoveCard }) {
   const scrollRef = useRef(null);
   const panelRef = useRef(null);
   const popoverRef = useRef(null);
@@ -178,8 +175,8 @@ function TimelineView({ cards, groupName, onAddClass, onAddBreak, onChangeCard, 
   // 放缩锚点：{ time, viewportY } —— 光标/视口中心对应的时刻放缩前后保持不动
   const anchorRef = useRef(null);
 
-  // 边缘拖拽状态：{ id, edge: 'start'|'end'|'move', value }（value 为吸附后的分钟数；
-  // move 模式下 value 表示新的开始时间，时长不变）
+  // 边缘拖拽状态：{ id, edge: 'start'|'end'|'move', value, partner }（value 为吸附后的分钟数；
+  // move 模式下 value 表示新的开始时间，时长不变；partner 为相邻边界联动时跟随移动的时间段）
   const [drag, setDrag] = useState(null);
   const dragBaseRef = useRef(null);
   const dragRafRef = useRef(0);
@@ -195,8 +192,9 @@ function TimelineView({ cards, groupName, onAddClass, onAddBreak, onChangeCard, 
   const [draftError, setDraftError] = useState('');
   const [editorPos, setEditorPos] = useState(null);
 
-  // items 合并拖拽预览（拖到当前时间范围外时画布也能实时扩展）
-  const items = cards.map((card, index) => {
+  // items 合并拖拽预览（拖到当前时间范围外时画布也能实时扩展）。
+  // 分割线是单点时间，单独派生为 dividerItems，不参与方块的区间校验。
+  const items = cards.filter((card) => card.type !== 'divider').map((card, index) => {
     let start = timeToMinutes(card.start);
     let end = timeToMinutes(card.end);
     if (drag && drag.id === card.id) {
@@ -211,11 +209,24 @@ function TimelineView({ cards, groupName, onAddClass, onAddBreak, onChangeCard, 
         end = drag.value + duration;
       }
     }
+    if (drag && drag.partner && drag.partner.id === card.id) {
+      // 相邻边界联动：伙伴时间段被拖动的边界跟随同一边界时间
+      if (drag.partner.edge === 'start') start = drag.value;
+      else end = drag.value;
+    }
     return { card, index, start, end, valid: start >= 0 && end >= 0 && end > start };
   });
+  const dividerItems = cards
+    .filter((card) => card.type === 'divider')
+    .map((card) => {
+      let minutes = timeToMinutes(card.start);
+      if (drag && drag.id === card.id && drag.edge === 'line') minutes = drag.value;
+      return { card, minutes, valid: minutes >= 0 };
+    });
   const validItems = items.filter((item) => item.valid);
+  const validDividers = dividerItems.filter((item) => item.valid);
   const invalidCount = items.length - validItems.length;
-  const { rangeStart, rangeEnd } = computeRange(items);
+  const { rangeStart, rangeEnd } = computeRange(items, dividerItems);
   const canvasHeight = (rangeEnd - rangeStart) * ppm;
   const tickStep = tickStepFor(ppm);
 
@@ -281,32 +292,75 @@ function TimelineView({ cards, groupName, onAddClass, onAddBreak, onChangeCard, 
     dragRafRef.current = 0;
     const base = dragBaseRef.current;
     if (!base) return;
-    const card = cardsRef.current.find((item) => item.id === base.id);
-    if (!card) return;
     const raw = base.baseMinutes + (dragClientYRef.current - base.startY) / ppmRef.current;
     let value = snapMinutes(raw);
+    if (base.edge === 'line') {
+      // 分割线：单点时间，钳制在 00:00 ~ 23:59
+      value = Math.min(Math.max(value, 0), DAY_MAX_MINUTES);
+      base.latestValue = value;
+      setDrag((prev) => (prev ? { ...prev, value } : prev));
+      return;
+    }
+    const card = cardsRef.current.find((item) => item.id === base.id);
+    if (!card) return;
     if (base.edge === 'move') {
       // 整块平移：钳制在 00:00 ~ 23:59 之内，时长保持不变
       value = Math.min(Math.max(value, 0), DAY_MAX_MINUTES - base.baseDuration);
     } else {
       const other = base.edge === 'start' ? timeToMinutes(card.end) : timeToMinutes(card.start);
       if (base.edge === 'start') {
-        value = Math.min(Math.max(value, 0), other - MIN_SLOT_MINUTES);
+        // 与上一时间段相邻时，其结束时间跟随移动，不能早于其开始时间 + 最小时长
+        const lower = base.partner ? base.partner.limit + MIN_SLOT_MINUTES : 0;
+        value = Math.min(Math.max(value, lower), other - MIN_SLOT_MINUTES);
       } else {
-        value = Math.max(Math.min(value, DAY_MAX_MINUTES), other + MIN_SLOT_MINUTES);
+        // 与下一时间段相邻时，其开始时间跟随移动，不能晚于其结束时间 - 最小时长
+        const upper = base.partner ? base.partner.limit - MIN_SLOT_MINUTES : DAY_MAX_MINUTES;
+        value = Math.max(Math.min(value, upper), other + MIN_SLOT_MINUTES);
       }
     }
     base.latestValue = value;
     setDrag((prev) => (prev ? { ...prev, value } : prev));
   };
 
+  // 相邻时间段（一个的结束时间恰好等于另一个的开始时间）共用同一条边界：
+  // 拖动该边界时两侧一起移动；拖动时间段本身（整体平移）不受影响。
+  const findAdjacentPartner = (item, edge) => {
+    const boundary = edge === 'end' ? item.end : item.start;
+    return items.find((other) => (
+      other.card.id !== item.card.id
+      && other.valid
+      && (edge === 'end' ? other.start === boundary : other.end === boundary)
+    )) || null;
+  };
+
   const startResize = (event, item, edge) => {
     event.preventDefault();
     event.stopPropagation();
     const baseMinutes = edge === 'start' ? item.start : item.end;
-    dragBaseRef.current = { id: item.card.id, edge, baseMinutes, startY: event.clientY, latestValue: baseMinutes };
+    const adjacent = findAdjacentPartner(item, edge);
+    const partner = adjacent
+      ? {
+        id: adjacent.card.id,
+        edge: edge === 'end' ? 'start' : 'end',
+        // 联动时的对侧极限：伙伴时间段的另一端点（保证双方都留在最小时长内）
+        limit: edge === 'end' ? adjacent.end : adjacent.start,
+      }
+      : null;
+    dragBaseRef.current = {
+      id: item.card.id,
+      edge,
+      baseMinutes,
+      startY: event.clientY,
+      latestValue: baseMinutes,
+      partner,
+    };
     dragClientYRef.current = event.clientY;
-    setDrag({ id: item.card.id, edge, value: baseMinutes });
+    setDrag({
+      id: item.card.id,
+      edge,
+      value: baseMinutes,
+      partner: partner ? { id: partner.id, edge: partner.edge } : null,
+    });
     try { event.currentTarget.setPointerCapture(event.pointerId); } catch (error) { /* 忽略 */ }
   };
 
@@ -366,6 +420,54 @@ function TimelineView({ cards, groupName, onAddClass, onAddBreak, onChangeCard, 
     if (pending.active) finishResize();
   };
 
+  // ===== 分割线：上下拖动改时间 / 点击编辑（与方块一致的 5px 阈值） =====
+  const linePendingRef = useRef(null);
+
+  const startLineGesture = (event, item) => {
+    if (event.pointerType === 'mouse' && event.button !== 0) return;
+    linePendingRef.current = {
+      id: item.card.id,
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      baseMinutes: item.minutes,
+      active: false,
+    };
+  };
+
+  const onLineMove = (event) => {
+    const pending = linePendingRef.current;
+    if (!pending || pending.pointerId !== event.pointerId) return;
+    if (!pending.active) {
+      const MOVE_THRESHOLD = 5;
+      if (Math.abs(event.clientY - pending.startY) < MOVE_THRESHOLD
+        && Math.abs(event.clientX - pending.startX) < MOVE_THRESHOLD) {
+        return;
+      }
+      pending.active = true;
+      dragBaseRef.current = {
+        id: pending.id,
+        edge: 'line',
+        baseMinutes: pending.baseMinutes,
+        startY: pending.startY,
+        latestValue: pending.baseMinutes,
+      };
+      dragClientYRef.current = pending.startY;
+      setDrag({ id: pending.id, edge: 'line', value: pending.baseMinutes });
+      try { event.currentTarget.setPointerCapture(event.pointerId); } catch (error) { /* 忽略 */ }
+    }
+    event.preventDefault();
+    dragClientYRef.current = event.clientY;
+    if (!dragRafRef.current) dragRafRef.current = requestAnimationFrame(applyDragMove);
+  };
+
+  const finishLineGesture = (event) => {
+    const pending = linePendingRef.current;
+    if (!pending || pending.pointerId !== event.pointerId) return;
+    linePendingRef.current = null;
+    if (pending.active) finishResize();
+  };
+
   const finishResize = () => {
     const base = dragBaseRef.current;
     if (dragRafRef.current) {
@@ -375,18 +477,27 @@ function TimelineView({ cards, groupName, onAddClass, onAddBreak, onChangeCard, 
     dragBaseRef.current = null;
     setDrag(null);
     if (base && Number.isFinite(base.latestValue) && base.latestValue !== base.baseMinutes) {
-      let patch;
-      if (base.edge === 'move') {
-        patch = {
+      if (base.edge === 'line') {
+        onChangeCard(base.id, { start: minutesToTimeText(base.latestValue) });
+      } else if (base.edge === 'move') {
+        onChangeCard(base.id, {
           start: minutesToTimeText(base.latestValue),
           end: minutesToTimeText(base.latestValue + base.baseDuration),
-        };
-      } else {
-        patch = base.edge === 'start'
+        });
+      } else if (base.partner) {
+        // 相邻边界联动：一次性提交两个时间段的修改，避免先后更新互相覆盖
+        const ownPatch = base.edge === 'start'
           ? { start: minutesToTimeText(base.latestValue) }
           : { end: minutesToTimeText(base.latestValue) };
+        const partnerPatch = base.partner.edge === 'start'
+          ? { start: minutesToTimeText(base.latestValue) }
+          : { end: minutesToTimeText(base.latestValue) };
+        onPatchCards({ [base.id]: ownPatch, [base.partner.id]: partnerPatch });
+      } else {
+        onChangeCard(base.id, base.edge === 'start'
+          ? { start: minutesToTimeText(base.latestValue) }
+          : { end: minutesToTimeText(base.latestValue) });
       }
-      onChangeCard(base.id, patch);
     }
     // 拖拽松手合成的 click 不要再打开编辑浮层
     suppressClickRef.current = true;
@@ -447,6 +558,15 @@ function TimelineView({ cards, groupName, onAddClass, onAddBreak, onChangeCard, 
   const saveDraft = () => {
     if (!selectedId || !draft) return;
     const start = timeToMinutes(draft.start);
+    if (draft.type === 'divider') {
+      if (start < 0) {
+        setDraftError('请填写有效的分割线时间。');
+        return;
+      }
+      onChangeCard(selectedId, { start: minutesToTimeText(start), type: 'divider' });
+      closeEditor();
+      return;
+    }
     const end = timeToMinutes(draft.end);
     if (start < 0 || end < 0 || end <= start) {
       setDraftError('请填写有效时间，且结束时间需晚于开始时间。');
@@ -490,6 +610,7 @@ function TimelineView({ cards, groupName, onAddClass, onAddBreak, onChangeCard, 
         {groupName && <span className="timeline-group">{groupName}</span>}
         <Button size="small" appearance="primary" onClick={onAddClass}>上课</Button>
         <Button size="small" onClick={onAddBreak}>课间</Button>
+        <Button size="small" onClick={onAddDivider}>分割线</Button>
         <span className="timeline-zoom">
           <button type="button" className="timeline-zoom-btn" title="缩小（-）" onClick={() => zoomBy(1 / 1.15)}>−</button>
           <button
@@ -506,10 +627,10 @@ function TimelineView({ cards, groupName, onAddClass, onAddBreak, onChangeCard, 
           <span className="timeline-hint">{invalidCount} 个时间段时间无效，未在时间线中显示</span>
         )}
       </div>
-      <p className="timeline-tip">拖动方块中间可整体移动时间段，拖动上/下边缘修改时间（自动对齐 5 分钟，支持触屏）；点击方块编辑时间与类型；Ctrl + 滚轮（或 +/- 键）纵向放缩。</p>
+      <p className="timeline-tip">拖动方块中间可整体移动，拖动上/下边缘修改时间；两个时间段相邻时，拖动共用边界会一起移动；灰色横线为分割线，上下拖动调整时间、点击编辑；Ctrl + 滚轮（或 +/- 键）纵向放缩。</p>
       <div className={`timeline-scroll${drag ? ' dragging' : ''}`} ref={scrollRef}>
-        {validItems.length === 0 ? (
-          <div className="empty">暂无可显示的时间段，点击上方“上课 / 课间”添加。</div>
+        {validItems.length === 0 && validDividers.length === 0 ? (
+          <div className="empty">暂无可显示的时间段，点击上方“上课 / 课间 / 分割线”添加。</div>
         ) : (
           <div className="timeline-canvas" style={{ height: `${canvasHeight}px` }}>
             {ticks}
@@ -562,6 +683,32 @@ function TimelineView({ cards, groupName, onAddClass, onAddBreak, onChangeCard, 
                 </div>
               );
             })}
+            {/* 分割线层：置于方块之上，重叠位置的指针事件优先命中分割线 */}
+            {validDividers.map((item) => {
+              const top = (item.minutes - rangeStart) * ppm;
+              const isDragging = drag?.id === item.card.id && drag.edge === 'line';
+              const label = isDragging ? minutesToTimeText(drag.value) : item.card.start;
+              return (
+                <div
+                  key={item.card.id}
+                  ref={(el) => {
+                    if (el) blockRefs.current.set(item.card.id, el);
+                    else blockRefs.current.delete(item.card.id);
+                  }}
+                  className={`timeline-divider${isDragging ? ' dragging' : ''}${selectedId === item.card.id ? ' selected' : ''}`}
+                  style={{ top: `${top}px` }}
+                  title="点击编辑分割线时间，上下拖动调整位置"
+                  onClick={() => openEditor(item.card)}
+                  onPointerDown={(event) => startLineGesture(event, item)}
+                  onPointerMove={onLineMove}
+                  onPointerUp={finishLineGesture}
+                  onPointerCancel={finishLineGesture}
+                >
+                  <span className="timeline-divider-label">{label}</span>
+                  <span className="timeline-divider-rule" />
+                </div>
+              );
+            })}
           </div>
         )}
       </div>
@@ -570,9 +717,9 @@ function TimelineView({ cards, groupName, onAddClass, onAddBreak, onChangeCard, 
         <>
           <div className="timeline-editor-backdrop" onMouseDown={closeEditor} />
           <div className="timeline-editor" ref={popoverRef} style={editorPos || { opacity: 0 }}>
-            <div className="timeline-editor-title">编辑时间段</div>
+            <div className="timeline-editor-title">{draft.type === 'divider' ? '编辑分割线' : '编辑时间段'}</div>
             <div className="timeline-editor-row">
-              <label>开始</label>
+              <label>{draft.type === 'divider' ? '时间' : '开始'}</label>
               <Input
                 type="time"
                 step="300"
@@ -580,15 +727,17 @@ function TimelineView({ cards, groupName, onAddClass, onAddBreak, onChangeCard, 
                 onChange={(event) => { setDraftError(''); setDraft({ ...draft, start: event.target.value }); }}
               />
             </div>
-            <div className="timeline-editor-row">
-              <label>结束</label>
-              <Input
-                type="time"
-                step="300"
-                value={draft.end}
-                onChange={(event) => { setDraftError(''); setDraft({ ...draft, end: event.target.value }); }}
-              />
-            </div>
+            {draft.type !== 'divider' && (
+              <div className="timeline-editor-row">
+                <label>结束</label>
+                <Input
+                  type="time"
+                  step="300"
+                  value={draft.end}
+                  onChange={(event) => { setDraftError(''); setDraft({ ...draft, end: event.target.value }); }}
+                />
+              </div>
+            )}
             <div className="timeline-editor-row">
               <label>类型</label>
               <Select
@@ -605,6 +754,7 @@ function TimelineView({ cards, groupName, onAddClass, onAddBreak, onChangeCard, 
               >
                 <option value="class">上课</option>
                 <option value="break">课间</option>
+                <option value="divider">分割线</option>
               </Select>
             </div>
             {draft.type === 'break' && (
@@ -650,13 +800,6 @@ export default function TimetablePage({
   const navRef = useRef(null);
   const cardRef = useRef(null);
   const listRef = useRef(null);
-  const [dragId, setDragId] = useState(null);
-  // 触屏手势生命周期跨越多次渲染，回调闭包里只能通过 ref 读取最新列表/拖拽 id
-  const cardsRef = useRef(cards);
-  cardsRef.current = cards;
-  const dragIdRef = useRef(null);
-  const cardTouchGhost = useRef(null);
-  const cardTouchGesture = useRef(null);
   // 时间表右侧两个独立子页：时间段列表 / 图形化时间线（偏好持久化）
   const [subView, setSubViewState] = useState(() => (
     localStorage.getItem('timetableSubView') === 'timeline' ? 'timeline' : 'list'
@@ -670,8 +813,16 @@ export default function TimetablePage({
   const [breakMinutes, setBreakMinutes] = useState(() => localStorage.getItem('timetableDefaultBreakMinutes') || '10');
   const badges = computeBadges(cards);
 
+  // 所有修改后都保持“按开始时间自动排序”的展示顺序
   const updateCard = (id, patch) => {
-    onCardsChange(cards.map((card) => (card.id === id ? { ...card, ...patch } : card)));
+    onCardsChange(sortCardsByTime(cards.map((card) => (card.id === id ? { ...card, ...patch } : card))));
+  };
+
+  // 一次提交多张卡片的修改（时间线相邻边界联动拖动）
+  const patchCards = (patches) => {
+    onCardsChange(sortCardsByTime(cards.map((card) => (
+      patches[card.id] ? { ...card, ...patches[card.id] } : card
+    ))));
   };
 
   const removeCard = (id) => {
@@ -690,118 +841,41 @@ export default function TimetablePage({
     element.classList.add('flash');
   };
 
-  // 新增时间段：开始时间 = 最后一个时间有效的卡片的结束时间（默认 08:00），
-  // 结束时间 = 开始时间 + 左侧设置的默认上课/课间时长
+  // 新增上课/课间：开始时间 = 最后一个时间有效卡片的结束时间（默认 08:00），
+  // 结束时间 = 开始时间 + 左侧设置的默认时长。
+  // 新增分割线：单点时间，默认取最后一张卡片的结束时间（分割线取自身时间）。
   const addSlot = (type) => {
     let startMinutes = 8 * 60;
     for (let i = cards.length - 1; i >= 0; i -= 1) {
-      const end = timeToMinutes(cards[i].end);
-      if (end >= 0) { startMinutes = end; break; }
+      const reference = cards[i].type === 'divider'
+        ? timeToMinutes(cards[i].start)
+        : timeToMinutes(cards[i].end);
+      if (reference >= 0) { startMinutes = reference; break; }
     }
-    const duration = type === 'class'
-      ? parseDurationMinutes(classMinutes, 40)
-      : parseDurationMinutes(breakMinutes, 10);
     const newCard = {
       id: createCardId(),
       type,
       start: minutesToTimeText(startMinutes),
-      end: minutesToTimeText(startMinutes + duration),
-      name: type === 'break' ? '课间' : '',
+      end: '',
+      name: '',
     };
-    onCardsChange([...cards, newCard]);
+    if (type === 'divider') {
+      newCard.end = '';
+    } else {
+      const duration = type === 'class'
+        ? parseDurationMinutes(classMinutes, 40)
+        : parseDurationMinutes(breakMinutes, 10);
+      newCard.end = minutesToTimeText(Math.min(startMinutes + duration, 23 * 60 + 59));
+      newCard.name = type === 'break' ? '课间' : '';
+    }
+    onCardsChange(sortCardsByTime([...cards, newCard]));
     // 在列表页新增时定位到新卡片；在时间线页新增时停留当前页即可
     if (subView === 'list') {
       setTimeout(() => focusCard(newCard.id), 60);
     }
   };
 
-  const moveBefore = (targetIndex) => {
-    if (dragId === null) return;
-    const from = cards.findIndex((card) => card.id === dragId);
-    if (from < 0 || from === targetIndex) return;
-    const next = [...cards];
-    const [moved] = next.splice(from, 1);
-    const insertAt = from < targetIndex ? targetIndex - 1 : targetIndex;
-    next.splice(insertAt, 0, moved);
-    onCardsChange(next);
-  };
-
-  const onListDragOver = (event) => {
-    if (dragId === null) return;
-    event.preventDefault();
-    if (event.dataTransfer) event.dataTransfer.dropEffect = 'move';
-    const targetCard = event.target.closest?.('[data-card-index]');
-    if (!targetCard || !listRef.current?.contains(targetCard)) {
-      // 拖到列表末尾空白处：追加到最后
-      if (listRef.current?.contains(event.target)) moveBefore(cards.length);
-      return;
-    }
-    const rect = targetCard.getBoundingClientRect();
-    const targetIndex = Number(targetCard.dataset.cardIndex);
-    if (event.clientY < rect.top + rect.height / 2) {
-      moveBefore(targetIndex);
-    } else {
-      moveBefore(targetIndex + 1);
-    }
-  };
-
-  // 触屏拖拽卡片排序：HTML5 DnD 在触屏下不触发，用 pointer 手势实时重排
-  const moveCardToIndex = (targetIndex, liveCards, activeId) => {
-    if (!activeId) return;
-    const from = liveCards.findIndex((card) => card.id === activeId);
-    if (from < 0 || from === targetIndex) return;
-    const next = [...liveCards];
-    const [moved] = next.splice(from, 1);
-    const insertAt = from < targetIndex ? targetIndex - 1 : targetIndex;
-    next.splice(insertAt, 0, moved);
-    onCardsChange(next);
-  };
-
-  const reorderCardAtPoint = (x, y) => {
-    const list = listRef.current;
-    if (!list) return;
-    const liveCards = cardsRef.current;
-    const activeId = dragIdRef.current;
-    const hitEl = document.elementFromPoint(x, y);
-    const targetCard = hitEl?.closest?.('[data-card-index]');
-    if (!targetCard || !list.contains(targetCard)) {
-      if (hitEl && list.contains(hitEl)) moveCardToIndex(liveCards.length, liveCards, activeId);
-      return;
-    }
-    const rect = targetCard.getBoundingClientRect();
-    const targetIndex = Number(targetCard.dataset.cardIndex);
-    if (y < rect.top + rect.height / 2) moveCardToIndex(targetIndex, liveCards, activeId);
-    else moveCardToIndex(targetIndex + 1, liveCards, activeId);
-  };
-
-  const onTouchDragCard = (event, card) => {
-    if (event.pointerType === 'mouse') return;
-    const sourceEl = event.currentTarget.closest('.timetable-card');
-    if (!sourceEl) return;
-    const gesture = beginPointerGesture(event, {
-      threshold: 8,
-      onActivate: ({ x, y }) => {
-        dragIdRef.current = card.id;
-        setDragId(card.id);
-        sourceEl.classList.add('touch-dragging');
-        cardTouchGhost.current = createDragGhost(sourceEl);
-        cardTouchGhost.current.move(x, y);
-        reorderCardAtPoint(x, y);
-      },
-      onMove: ({ x, y }) => {
-        cardTouchGhost.current?.move(x, y);
-        reorderCardAtPoint(x, y);
-      },
-      onEnd: () => {
-        sourceEl.classList.remove('touch-dragging');
-        cardTouchGhost.current?.dispose();
-        cardTouchGhost.current = null;
-        dragIdRef.current = null;
-        setDragId(null);
-      },
-    });
-    if (gesture) cardTouchGesture.current = gesture;
-  };
+  // 时间段列表已改为按开始时间自动排序，不再提供手动拖拽排序
 
   // 与旧版 applyTimetableLayout 相同的宽度钳制
   useLayoutEffect(() => {
@@ -909,16 +983,11 @@ export default function TimetablePage({
                 <div className="group-card" ref={cardRef} data-timetable-name={activeName}>
                   <h3>{activeName}</h3>
                   <p className="field-help timetable-help">
-                    上课时间段无需填写节次，保存时按开始时间自动从第 1 节开始编号；拖动卡片左侧手柄可调整时间段的显示顺序。
+                    时间段按开始时间自动排序；上课时间段无需填写节次，保存时按开始时间自动从第 1 节开始编号。
                   </p>
-                  <div
-                    className="timetable-card-list"
-                    ref={listRef}
-                    onDragOver={onListDragOver}
-                    onDrop={(event) => { if (dragId !== null) event.preventDefault(); }}
-                  >
+                  <div className="timetable-card-list" ref={listRef}>
                     {cards.length === 0 && (
-                      <div className="empty">暂无时间段，点击下方“新增上课 / 新增课间”添加。</div>
+                      <div className="empty">暂无时间段，点击下方“新增上课 / 新增课间 / 新增分割线”添加。</div>
                     )}
                     {cards.map((card, index) => (
                       <TimetableCard
@@ -927,14 +996,6 @@ export default function TimetablePage({
                         index={index}
                         badge={badges.get(card.id)}
                         invalid={invalidIndexes.has(index)}
-                        draggableEnabled={dragId === card.id}
-                        onPointerDownHandle={() => setDragId(card.id)}
-                        onTouchDragHandle={(event) => onTouchDragCard(event, card)}
-                        onDragStart={(event) => {
-                          event.dataTransfer.effectAllowed = 'move';
-                          try { event.dataTransfer.setData('text/plain', ''); } catch (error) { /* 忽略 */ }
-                        }}
-                        onDragEnd={() => setDragId(null)}
                         onChange={(patch) => updateCard(card.id, patch)}
                         onRemove={() => removeCard(card.id)}
                       />
@@ -943,6 +1004,7 @@ export default function TimetablePage({
                   <div className="row-actions">
                     <Button appearance="primary" onClick={() => addSlot('class')}>新增上课</Button>
                     <Button onClick={() => addSlot('break')}>新增课间</Button>
+                    <Button onClick={() => addSlot('divider')}>新增分割线</Button>
                     <Button onClick={() => onRenameGroup(activeName)}>重命名</Button>
                   </div>
                 </div>
@@ -953,7 +1015,9 @@ export default function TimetablePage({
                   groupName={activeName}
                   onAddClass={() => addSlot('class')}
                   onAddBreak={() => addSlot('break')}
+                  onAddDivider={() => addSlot('divider')}
                   onChangeCard={updateCard}
+                  onPatchCards={patchCards}
                   onRemoveCard={removeCard}
                 />
               )}

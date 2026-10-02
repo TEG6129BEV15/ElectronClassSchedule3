@@ -4,6 +4,7 @@ const fs = require('fs')
 const os = require('os')
 const createShortcut = require('windows-shortcuts')
 const yaml = require('js-yaml')
+const { parseTableFile, parseImageFile } = require('./schedule-import');
 const startupFolderPath = path.join(os.homedir(), 'AppData', 'Roaming', 'Microsoft', 'Windows', 'Start Menu', 'Programs', 'Startup');
 const Store = require('electron-store');
 const { DisableMinimize } = require('electron-disable-minimize');
@@ -281,6 +282,332 @@ function broadcastActiveTheme() {
     });
 }
 
+// ===== 插件系统 =====
+// 每个插件是 plugins 文件夹中的一个子文件夹，含 index.json 清单：
+// {
+//   "name": "点名", "version": "1.0.0", "description": "...",
+//   "main": "main.js",          // 主进程脚本：module.exports = (api) => ({ cleanup })
+//   "renderer": "renderer.js",  // 主窗口脚本：用 window.pluginHost.registerComponent 注册组件/监听 tick
+//   "settings": "settings.js",  // 设置界面脚本：window.__pluginSettingsMounts[插件id] = (container, api) => {}
+//   "components": [{ "type": "rollcall", "name": "点名", "description": "...",
+//                    "options": [{ "key": "x", "label": "X", "type": "text", "default": "" }] }]
+// }
+// 启用状态保存在 settings.js 的 plugins_enabled: { 插件id: true }。
+// 插件可以新增主窗口组件、触发提醒（api.reminder.show）、扩展托盘菜单（api.addTrayAction）、
+// 创建自己的窗口（api.createWindow）、读写自己的数据（api.storage）与设置（settings.plugins[id]）。
+const PLUGINS_DIR = path.join(__dirname, 'plugins');
+
+function ensurePluginsDir() {
+    try { fs.mkdirSync(PLUGINS_DIR, { recursive: true }); } catch (error) { /* 忽略 */ }
+}
+
+function readEnabledPluginIds() {
+    const settings = readSettingsObject();
+    const map = settings && settings.plugins_enabled;
+    if (!map || typeof map !== 'object') return [];
+    return Object.keys(map).filter((id) => map[id] === true);
+}
+
+// 扫描 plugins 目录（资源路径已转成 file:// URL）；清单非法的子文件夹忽略
+function readPlugins() {
+    ensurePluginsDir();
+    const plugins = [];
+    let entries = [];
+    try {
+        entries = fs.readdirSync(PLUGINS_DIR, { withFileTypes: true });
+    } catch (error) {
+        return plugins;
+    }
+    for (const entry of entries) {
+        if (!entry.isDirectory()) continue;
+        const dir = path.join(PLUGINS_DIR, entry.name);
+        let manifest = null;
+        try {
+            manifest = JSON.parse(fs.readFileSync(path.join(dir, 'index.json'), 'utf8'));
+        } catch (error) {
+            continue;
+        }
+        if (!manifest || typeof manifest !== 'object') continue;
+        // 禁止路径逃逸插件文件夹
+        const safeFile = (name) => {
+            if (typeof name !== 'string' || !name.trim() || name.split(/[\\/]/).includes('..')) return null;
+            const full = path.join(dir, name);
+            return fs.existsSync(full) ? full : null;
+        };
+        const mainFile = safeFile(manifest.main);
+        const rendererFile = safeFile(manifest.renderer);
+        const settingsFile = safeFile(manifest.settings);
+        const components = (Array.isArray(manifest.components) ? manifest.components : [])
+            .filter((item) => item && typeof item.type === 'string' && item.type.trim())
+            .map((item) => ({
+                type: String(item.type).trim(),
+                name: item.name ? String(item.name) : String(item.type),
+                description: item.description ? String(item.description) : '',
+                options: (Array.isArray(item.options) ? item.options : [])
+                    .filter((option) => option && typeof option.key === 'string' && option.key.trim())
+                    .map((option) => ({
+                        key: String(option.key),
+                        label: option.label ? String(option.label) : String(option.key),
+                        type: ['text', 'number', 'switch'].includes(option.type) ? option.type : 'text',
+                        default: option.default,
+                    })),
+            }));
+        plugins.push({
+            id: entry.name,
+            name: manifest.name ? String(manifest.name) : entry.name,
+            version: manifest.version ? String(manifest.version) : '',
+            description: manifest.description ? String(manifest.description) : '',
+            components,
+            mainFile,
+            renderer: rendererFile ? pathToFileURL(rendererFile).href : null,
+            settings: settingsFile ? pathToFileURL(settingsFile).href : null,
+            dir,
+        });
+    }
+    plugins.sort((a, b) => a.id.localeCompare(b.id, 'zh-Hans-CN'));
+    return plugins;
+}
+
+// 已激活的插件实例：pluginId → { plugin, trayActions, ipcChannels, ipcListeners, windows, cleanups, settingsListeners }
+const activePlugins = new Map();
+
+// 写入某个插件的专属设置（settings.plugins[插件id]），并同步启停状态
+function writePluginSettings(pluginId, value) {
+    const settingsPath = path.join(__dirname, 'js', 'settings.js');
+    const settings = readSettingsObject();
+    if (!settings.plugins || typeof settings.plugins !== 'object') settings.plugins = {};
+    if (value && typeof value === 'object') settings.plugins[pluginId] = value;
+    else delete settings.plugins[pluginId];
+    const formatted = `const _settings = ${JSON.stringify(settings, null, 4)}\n\nvar settings = JSON.parse(JSON.stringify(_settings))\n`;
+    fs.writeFileSync(settingsPath, formatted, 'utf8');
+    loadActivePlugins();
+}
+
+function createPluginApi(plugin, instance) {
+    return {
+        pluginId: plugin.id,
+        pluginName: plugin.name,
+        dir: plugin.dir,
+        resolve: (...parts) => path.join(plugin.dir, ...parts),
+        app,
+        path,
+        shell,
+        dialog,
+        BrowserWindow,
+        screen,
+        store,
+        // 插件在主进程设置里的专属配置：settings.plugins[插件id]
+        getSettings: () => {
+            const settings = readSettingsObject();
+            const value = settings && settings.plugins && settings.plugins[plugin.id];
+            return value && typeof value === 'object' ? value : {};
+        },
+        // 整个 settings.js 的内容（只读），用于读取主窗口位置等全局设置
+        readAppSettings: () => readSettingsObject(),
+        // 插件在主进程里保存自己的设置（不会 reload 主窗口，插件可自行响应 onSettingsChanged）
+        saveSettings: (value) => {
+            writePluginSettings(plugin.id, value);
+            return true;
+        },
+        onSettingsChanged: (callback) => { instance.settingsListeners.push(callback); },
+        // 插件自己的持久化数据（electron-store，按插件命名空间隔离）
+        storage: {
+            get: (key, fallback) => store.get(`plugin-data:${plugin.id}:${key}`, fallback),
+            set: (key, value) => { store.set(`plugin-data:${plugin.id}:${key}`, value); },
+        },
+        // 供渲染层（设置界面 / 插件窗口）调用的请求-响应通道，自动加 plugin:<id>: 前缀并随卸载移除
+        registerIpc: (channel, handler) => {
+            const full = `plugin:${plugin.id}:${channel}`;
+            ipcMain.removeHandler(full);
+            ipcMain.handle(full, (event, payload) => handler(payload, event));
+            instance.ipcChannels.push(full);
+            return full;
+        },
+        registerIpcListener: (channel, handler) => {
+            const full = `plugin:${plugin.id}:${channel}`;
+            ipcMain.removeAllListeners(full);
+            ipcMain.on(full, (event, payload) => handler(payload, event));
+            instance.ipcListeners.push(full);
+            return full;
+        },
+        // 托盘菜单项：点击后先收起菜单再执行 onClick（可弹自己的窗口/对话框）
+        addTrayAction: (action) => {
+            if (!action || !action.id || !action.label || typeof action.onClick !== 'function') return;
+            instance.trayActions.push({
+                id: String(action.id),
+                label: String(action.label),
+                svgText: action.svgText ? String(action.svgText) : (action.svg ? String(action.svg) : ''),
+                icon: action.icon,
+                onClick: action.onClick,
+            });
+        },
+        createWindow: (options) => {
+            const winObj = new BrowserWindow(options);
+            instance.windows.push(winObj);
+            winObj.on('closed', () => {
+                instance.windows = instance.windows.filter((item) => item !== winObj);
+            });
+            return winObj;
+        },
+        // 复用主界面的提醒展示（遮罩 + 光效 + 音效）
+        reminder: {
+            show: (payload) => {
+                if (win && !win.isDestroyed()) {
+                    win.webContents.send('reminder-trigger', payload || {});
+                }
+            },
+        },
+        broadcast: (channel, payload) => {
+            BrowserWindow.getAllWindows().forEach((winObj) => {
+                if (!winObj.isDestroyed() && winObj.webContents && !winObj.webContents.isDestroyed()) {
+                    winObj.webContents.send(channel, payload);
+                }
+            });
+        },
+        getMainWindow: () => (win && !win.isDestroyed() ? win : null),
+        // 打开软件设置（可指定初始页面，如 'plugins'）
+        openSoftwareSettings: (page) => openSoftwareSettingsWindow(page),
+        log: (...args) => console.log(`[plugin:${plugin.id}]`, ...args),
+    };
+}
+
+function activatePlugin(plugin) {
+    const instance = {
+        plugin,
+        trayActions: [],
+        ipcChannels: [],
+        ipcListeners: [],
+        windows: [],
+        cleanups: [],
+        settingsListeners: [],
+    };
+    activePlugins.set(plugin.id, instance);
+    if (!plugin.mainFile) return;
+    try {
+        // 支持热启停：重新启用时清掉 require 缓存，重新执行插件主脚本
+        try { delete require.cache[require.resolve(plugin.mainFile)]; } catch (error) { /* 忽略 */ }
+        const activator = require(plugin.mainFile);
+        const result = typeof activator === 'function' ? activator(createPluginApi(plugin, instance)) : null;
+        if (result && typeof result.cleanup === 'function') instance.cleanups.push(result.cleanup);
+    } catch (error) {
+        console.error(`[plugin] ${plugin.id} 主进程脚本加载失败:`, error);
+    }
+}
+
+function unloadPlugin(pluginId) {
+    const instance = activePlugins.get(pluginId);
+    if (!instance) return;
+    activePlugins.delete(pluginId);
+    instance.cleanups.forEach((cleanup) => {
+        try { cleanup(); } catch (error) { console.error(`[plugin] ${pluginId} cleanup 失败:`, error); }
+    });
+    instance.ipcChannels.forEach((channel) => ipcMain.removeHandler(channel));
+    instance.ipcListeners.forEach((channel) => ipcMain.removeAllListeners(channel));
+    instance.windows.forEach((winObj) => {
+        try { if (!winObj.isDestroyed()) winObj.close(); } catch (error) { /* 忽略 */ }
+    });
+}
+
+// 按 settings.plugins_enabled 同步启停（设置保存后调用；幂等）
+function loadActivePlugins() {
+    const enabled = new Set(readEnabledPluginIds());
+    Array.from(activePlugins.keys()).forEach((pluginId) => {
+        if (!enabled.has(pluginId)) unloadPlugin(pluginId);
+    });
+    readPlugins().forEach((plugin) => {
+        if (!enabled.has(plugin.id) || activePlugins.has(plugin.id)) return;
+        activatePlugin(plugin);
+    });
+    // 插件设置变化通知（已激活插件）
+    activePlugins.forEach((instance) => {
+        instance.settingsListeners.forEach((callback) => {
+            try { callback(instance.plugin); } catch (error) { console.error('[plugin] 设置回调失败:', error); }
+        });
+    });
+}
+
+// 托盘菜单里的插件项（id 形如 plugin:<插件id>:<动作id>）
+function getPluginTrayActions() {
+    const items = [];
+    activePlugins.forEach((instance, pluginId) => {
+        instance.trayActions.forEach((action) => {
+            items.push({
+                id: `plugin:${pluginId}:${action.id}`,
+                label: action.label,
+                svgText: action.svgText,
+                icon: action.icon,
+            });
+        });
+    });
+    return items;
+}
+
+function executePluginTrayAction(id) {
+    const parts = String(id).split(':');
+    if (parts.length < 3 || parts[0] !== 'plugin') return false;
+    const instance = activePlugins.get(parts[1]);
+    const action = instance && instance.trayActions.find((item) => item.id === parts.slice(2).join(':'));
+    if (action) {
+        // 托盘菜单收起后再执行，避免插件弹窗被菜单失焦逻辑干扰
+        setTimeout(() => {
+            try { action.onClick(); } catch (error) { console.error('[plugin] 托盘动作执行失败:', error); }
+        }, 80);
+    }
+    return false;
+}
+
+// 主窗口渲染层需要的插件信息（渲染脚本 URL + 组件清单）
+function getEnabledPluginRenderers() {
+    const enabled = new Set(readEnabledPluginIds());
+    return readPlugins()
+        .filter((plugin) => enabled.has(plugin.id))
+        .map((plugin) => ({
+            id: plugin.id,
+            name: plugin.name,
+            renderer: plugin.renderer,
+            components: plugin.components,
+        }));
+}
+
+ipcMain.handle('list-plugins', async () => {
+    const enabled = new Set(readEnabledPluginIds());
+    const plugins = readPlugins().map((plugin) => ({
+        id: plugin.id,
+        name: plugin.name,
+        version: plugin.version,
+        description: plugin.description,
+        components: plugin.components,
+        hasMain: !!plugin.mainFile,
+        settings: plugin.settings,
+        renderer: plugin.renderer,
+        dir: plugin.dir,
+        enabled: enabled.has(plugin.id),
+    }));
+    return { plugins, dir: PLUGINS_DIR };
+})
+
+ipcMain.handle('get-enabled-plugins', async () => getEnabledPluginRenderers())
+
+ipcMain.handle('plugin-settings-get', async (event, pluginId) => {
+    const settings = readSettingsObject();
+    const value = settings && settings.plugins && settings.plugins[pluginId];
+    return value && typeof value === 'object' ? value : {};
+})
+
+// 保存某个插件的设置：写入 settings.plugins[插件id]，通知插件并 reload 主窗口
+ipcMain.handle('plugin-settings-save', async (event, pluginId, value) => {
+    writePluginSettings(pluginId, value);
+    if (win && !win.isDestroyed()) reloadMainWindow();
+    return true;
+})
+
+ipcMain.on('open-plugins-folder', async () => {
+    ensurePluginsDir();
+    shell.openPath(PLUGINS_DIR);
+})
+
+// （插件系统代码结束）
+
 // 主窗口位置模式：top（顶部居中，默认）/ top-right（顶部靠右）/ right（右侧竖排）
 function readWindowPositionMode() {
     try {
@@ -487,9 +814,14 @@ function openConfigEditorWindow() {
     })
 }
 
-function openSoftwareSettingsWindow() {
+function openSoftwareSettingsWindow(page) {
+    const targetPage = typeof page === 'string' && page ? page : null;
     if (softwareSettingsWin && !softwareSettingsWin.isDestroyed()) {
         softwareSettingsWin.focus();
+        // 已打开时通知它切换到指定页面（如插件的“常用应用”浮窗齿轮 -> 插件页）
+        if (targetPage) {
+            softwareSettingsWin.webContents.send('settings-navigate', targetPage);
+        }
         return;
     }
 
@@ -508,12 +840,19 @@ function openSoftwareSettingsWindow() {
             enableRemoteModule: true
         }
     }));
-    softwareSettingsWin.loadFile(path.join(__dirname, 'dist', 'software-settings.html'));
+    softwareSettingsWin.loadFile(path.join(__dirname, 'dist', 'software-settings.html'), {
+        query: targetPage ? { page: targetPage } : undefined
+    });
     saveWindowSizeOnClose('softwareSettings', softwareSettingsWin);
     softwareSettingsWin.on('closed', () => {
         softwareSettingsWin = undefined;
     });
 }
+
+// 任意窗口请求打开软件设置（可指定初始页面，如插件浮窗的“设置”按钮）
+ipcMain.on('open-software-settings', (event, page) => {
+    openSoftwareSettingsWindow(typeof page === 'string' ? page : undefined);
+})
 
 async function openCourseFusionWindow() {
     if (courseFusionWin && !courseFusionWin.isDestroyed()) {
@@ -564,6 +903,8 @@ async function openCourseFusionWindow() {
 
 app.whenReady().then(() => {
     ensureThemeDir()
+    ensurePluginsDir()
+    loadActivePlugins()
     createWindow()
     createTrayMenu()
     Menu.setApplicationMenu(null)
@@ -597,7 +938,7 @@ let trayMenuShownAt = 0;
 const iconUrl = (name) => require('url').pathToFileURL(path.join(__dirname, 'image', name)).href;
 
 function buildTrayMenuModel() {
-    return [
+    const items = [
         { id: 'adjust', label: '临时调课', icon: iconUrl('adjust.png') },
         { id: 'fusion', label: '课程融合', icon: iconUrl('fusion.png') },
         { id: 'temp', label: '加载临时课表', icon: iconUrl('toggle.png') },
@@ -610,10 +951,17 @@ function buildTrayMenuModel() {
         { type: 'separator' },
         { id: 'editor', label: '课表配置编辑器', icon: iconUrl('editor.png') },
         { id: 'settings', label: '软件设置', icon: iconUrl('setting.png') },
-        { type: 'separator' },
+        { type: 'separator' }
+    ];
+    // 插件扩展的托盘菜单项（如“点名”）：跟随在固定项之后
+    const pluginActions = getPluginTrayActions();
+    pluginActions.forEach((action) => items.push(action));
+    if (pluginActions.length) items.push({ type: 'separator' });
+    items.push(
         { id: 'restart', label: '重启', svg: 'restart' },
         { id: 'quit', label: '退出程序', icon: iconUrl('quit.png') }
-    ];
+    );
+    return items;
 }
 
 function sendTrayMenuData() {
@@ -695,6 +1043,10 @@ function closeTrayMenu() {
 
 // 执行菜单项动作；返回 true 表示菜单保持打开（勾选类）
 function executeTrayAction(id) {
+    // 插件扩展项：plugin:<插件id>:<动作id>
+    if (typeof id === 'string' && id.startsWith('plugin:')) {
+        return executePluginTrayAction(id);
+    }
     switch (id) {
         case 'adjust':
             win.webContents.send('openSettingDialog');
@@ -1373,6 +1725,32 @@ ipcMain.handle('import-cses-file', async () => {
     return parseCsesText(text);
 })
 
+// 从表格（Excel / CSV）或图片（Windows OCR）导入课表。
+// 只做解析：主进程返回结构化结果，编辑器负责合并进草稿并由用户确认保存。
+ipcMain.handle('import-schedule-table', async () => {
+    const result = await dialog.showOpenDialog(configEditorWin, {
+        title: '从表格或图片导入课表',
+        properties: ['openFile'],
+        filters: [
+            { name: '表格或图片', extensions: ['xlsx', 'xls', 'csv', 'png', 'jpg', 'jpeg', 'bmp', 'webp', 'tif', 'tiff'] },
+            { name: '表格文件', extensions: ['xlsx', 'xls', 'csv'] },
+            { name: '图片文件', extensions: ['png', 'jpg', 'jpeg', 'bmp', 'webp', 'tif', 'tiff'] },
+            { name: '所有文件', extensions: ['*'] }
+        ]
+    });
+    if (result.canceled || !result.filePaths.length) return null;
+    const filePath = result.filePaths[0];
+    const ext = path.extname(filePath).toLowerCase();
+    try {
+        if (ext === '.xlsx' || ext === '.xls' || ext === '.csv') {
+            return { kind: 'table', parsed: parseTableFile(filePath) };
+        }
+        return { kind: 'image', parsed: await parseImageFile(filePath) };
+    } catch (error) {
+        return { error: (error && error.message) || '导入解析失败' };
+    }
+})
+
 ipcMain.handle('export-cses-file', async (event, cses) => {
     const result = await dialog.showSaveDialog(configEditorWin, {
         title: '导出为 CSES 课表文件',
@@ -1419,6 +1797,8 @@ ipcMain.handle('save-settings-file', async (event, settings, options) => {
     }
     // 启用的主题包可能改变，热广播到所有窗口
     broadcastActiveTheme();
+    // 插件启用状态可能改变：同步启停插件（新增托盘项/窗口，或卸载清理）
+    loadActivePlugins();
     // 窗口位置切换已由 window-position-preview 热应用并播放动画，
     // 随后的落盘不需要再整页 reload（否则会打断动画并闪一帧）
     if (win && !win.isDestroyed() && !options?.skipReload) {

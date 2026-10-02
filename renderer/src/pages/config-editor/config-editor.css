@@ -221,33 +221,6 @@
   box-shadow: 0 0 0 1px var(--danger);
 }
 
-.drag-handle {
-  flex: 0 0 auto;
-  width: 22px;
-  height: 30px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: var(--muted);
-  cursor: grab;
-  border-radius: 4px;
-  /* 触屏拖拽时阻止纵向滚动，确保 pointermove 持续送达 */
-  touch-action: none;
-}
-
-.drag-handle:active { cursor: grabbing; }
-
-.drag-handle svg {
-  width: 10px;
-  height: 16px;
-}
-
-/* 触屏拖拽中的源卡片：让出命中，使手指下方始终能检测到目标卡片 */
-.timetable-card.touch-dragging {
-  opacity: 0.45;
-  pointer-events: none;
-}
-
 .timetable-type-select.fui-Select {
   flex: 0 0 92px;
   width: 92px;
@@ -279,6 +252,39 @@
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+/* 分割线卡片：虚线灰边，与上课/课间卡片区分 */
+.timetable-card.divider-card {
+  background: color-mix(in srgb, var(--muted) 8%, var(--panel));
+  border: 1px dashed var(--control-border);
+}
+
+.timetable-card.divider-card:hover {
+  border-color: var(--accent);
+}
+
+.divider-mark {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 4px;
+  color: var(--muted);
+  font-size: 12.5px;
+  white-space: nowrap;
+}
+
+.divider-mark::before {
+  content: '分割线';
+  flex: 0 0 auto;
+}
+
+.divider-mark i {
+  flex: 1 1 auto;
+  min-width: 24px;
+  border-top: 2px solid var(--muted);
 }
 
 /* ----- 课表编辑卡片 ----- */
@@ -769,6 +775,77 @@
 .timeline-block:hover .timeline-resize-handle::after,
 .timeline-block.dragging .timeline-resize-handle::after {
   background: var(--accent);
+}
+
+/* ===== 时间线上的分割线：灰色横线，始终置于方块之上 ===== */
+.timeline-divider {
+  position: absolute;
+  left: 56px;
+  right: 2px;
+  height: 0;
+  z-index: 5;
+  cursor: ns-resize;
+  touch-action: none;
+}
+
+/* 加厚透明热区：线条上下各约 9px，便于在方块边缘重叠处优先命中分割线 */
+.timeline-divider::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: -9px;
+  height: 18px;
+}
+
+.timeline-divider-rule {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: -2px;
+  border-top: 3px solid var(--muted);
+}
+
+.timeline-divider-label {
+  position: absolute;
+  left: 8px;
+  top: -10px;
+  padding: 0 6px;
+  font-size: 11px;
+  line-height: 16px;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.1s ease;
+}
+
+.timeline-divider:hover .timeline-divider-label,
+.timeline-divider.selected .timeline-divider-label,
+.timeline-divider.dragging .timeline-divider-label {
+  opacity: 1;
+}
+
+.timeline-divider:hover,
+.timeline-divider.selected {
+  z-index: 6;
+}
+
+.timeline-divider:hover .timeline-divider-rule,
+.timeline-divider.selected .timeline-divider-rule {
+  border-top-color: var(--accent);
+}
+
+.timeline-divider.dragging {
+  z-index: 6;
+}
+
+.timeline-divider.dragging .timeline-divider-rule {
+  border-top-color: var(--accent);
+  border-top-width: 4px;
 }
 
 /* 点击方块后的内联编辑浮层 */

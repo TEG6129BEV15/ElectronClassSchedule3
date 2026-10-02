@@ -54,10 +54,10 @@ export function normalizeComponent(component, legacyIndex = 0, config, settings)
     };
     return { id: `${component}-${legacyIndex + 1}`, type: component, options: legacyOptions[component] || {} };
   }
-  if (!component || !COMPONENT_LABELS[component.type]) return null;
+  if (!component || typeof component.type !== 'string' || !component.type.trim()) return null;
   return {
     id: component.id || createComponentId(component.type),
-    type: component.type,
+    type: component.type.trim(),
     options: { ...(component.options || {}) },
   };
 }
@@ -72,13 +72,24 @@ export function getConfiguredComponentRows(settings, config) {
       : []));
 }
 
-function buildNewComponent(type, settings) {
+function buildNewComponent(type, settings, pluginDefs) {
   const component = { id: createComponentId(type), type, options: {} };
   if (type === 'week') component.options = { display: true };
   if (type === 'countdown') component.options = { mode: 'date', target: '', start: '', showProgress: true };
   if (type === 'time') component.options = { source: 'offset' };
   if (type === 'weather') component.options = { city: '' };
   if (type === 'customText') component.options = { text: settings?.custom_text || '' };
+  // 插件组件：按清单里的 options 模式填入默认值
+  const definition = (Array.isArray(pluginDefs) ? pluginDefs : []).find((item) => item && item.type === type);
+  if (definition) {
+    const options = {};
+    (Array.isArray(definition.options) ? definition.options : []).forEach((option) => {
+      if (!option || !option.key) return;
+      if (option.default !== undefined) options[option.key] = option.default;
+      else options[option.key] = option.type === 'switch' ? false : '';
+    });
+    component.options = options;
+  }
   return component;
 }
 
@@ -90,7 +101,21 @@ export default function ComponentsPage({
   settingsRef,
   bump,
   onStatus,
+  pluginComponents,
 }) {
+  // 组件名称/描述/图标：内置组件 + 启用插件声明的组件
+  const pluginDefs = Array.isArray(pluginComponents) ? pluginComponents : [];
+  const labels = { ...COMPONENT_LABELS };
+  const descriptions = { ...COMPONENT_DESCRIPTIONS };
+  const icons = { ...COMPONENT_ICONS };
+  const pluginSchemas = {};
+  pluginDefs.forEach((definition) => {
+    if (!definition || !definition.type) return;
+    labels[definition.type] = definition.name || definition.type;
+    descriptions[definition.type] = definition.description || '插件提供的组件';
+    icons[definition.type] = ICONS.componentCustomText;
+    pluginSchemas[definition.type] = Array.isArray(definition.options) ? definition.options : [];
+  });
   const dragRef = useRef(null); // {kind:'chip', id} | {kind:'row', index} | {kind:'library', type}
   const [draggingId, setDraggingId] = useState(null);
   const [overOrder, setOverOrder] = useState(null);
@@ -174,7 +199,7 @@ export default function ComponentsPage({
     if (!hit) return;
     const fakeEvent = { target: hit.hitEl, clientX: x, preventDefault() {} };
     if (drag.kind === 'library') {
-      insertComponent(buildNewComponent(drag.type, settingsRef.current), hit.rowIndex, fakeEvent);
+      insertComponent(buildNewComponent(drag.type, settingsRef.current, pluginDefs), hit.rowIndex, fakeEvent);
     } else {
       insertComponent(drag.id, hit.rowIndex, fakeEvent);
     }
@@ -310,7 +335,7 @@ export default function ComponentsPage({
     if (!drag) return;
     event.preventDefault();
     if (drag.kind === 'library') {
-      insertComponent(buildNewComponent(drag.type, settingsRef.current), rowIndex, event);
+      insertComponent(buildNewComponent(drag.type, settingsRef.current, pluginDefs), rowIndex, event);
     } else if (drag.kind === 'chip') {
       insertComponent(drag.id, rowIndex, event);
     }
@@ -445,9 +470,9 @@ export default function ComponentsPage({
                       <Svg size={14} viewBox="0 0 8 16" html={ICONS.dragDotsVertical} strokeWidth={0} />
                     </span>
                     <span className="component-type-icon">
-                      <Svg size={16} viewBox="0 0 20 20" html={COMPONENT_ICONS[component.type]} strokeWidth={1.4} />
+                      <Svg size={16} viewBox="0 0 20 20" html={icons[component.type] || ICONS.componentCustomText} strokeWidth={1.4} />
                     </span>
-                    <span className="component-option">{COMPONENT_LABELS[component.type]}</span>
+                    <span className="component-option">{labels[component.type] || component.type}</span>
                     <Button
                       className="chip-remove win-icon"
                       type="button"
@@ -486,7 +511,7 @@ export default function ComponentsPage({
         }}
         onDragEnd={clearDragState}
       >
-        {Object.keys(COMPONENT_LABELS).map((type) => (
+        {Object.keys(labels).map((type) => (
           <div
             key={type}
             className="component-library-card"
@@ -495,11 +520,11 @@ export default function ComponentsPage({
             onPointerDown={(event) => beginLibraryTouchDrag(event, type)}
           >
             <span className="component-type-icon">
-              <Svg size={20} viewBox="0 0 20 20" html={COMPONENT_ICONS[type]} strokeWidth={1.4} />
+              <Svg size={20} viewBox="0 0 20 20" html={icons[type] || ICONS.componentCustomText} strokeWidth={1.4} />
             </span>
             <div className="component-library-text">
-              <strong>{COMPONENT_LABELS[type]}</strong>
-              <span>{COMPONENT_DESCRIPTIONS[type]}</span>
+              <strong>{labels[type]}</strong>
+              <span>{descriptions[type]}</span>
             </div>
           </div>
         ))}
@@ -511,11 +536,15 @@ export default function ComponentsPage({
         ) : (
           <>
             <div className="component-editor-title">
-              <strong>{COMPONENT_LABELS[selected.type]}实例设置</strong>
+              <strong>{labels[selected.type] || selected.type}实例设置</strong>
               <span className="field-help">{selected.id}</span>
             </div>
             <div className="component-editor-fields">
-              <ComponentEditorFields component={selected} onOption={updateOption} />
+              <ComponentEditorFields
+                component={selected}
+                onOption={updateOption}
+                pluginSchema={pluginSchemas[selected.type] || null}
+              />
             </div>
           </>
         )}
@@ -524,8 +553,39 @@ export default function ComponentsPage({
   );
 }
 
-function ComponentEditorFields({ component, onOption }) {
+function ComponentEditorFields({ component, onOption, pluginSchema }) {
   const options = component.options || {};
+  // 插件组件：按清单声明的 options 模式渲染通用表单
+  if (Array.isArray(pluginSchema) && pluginSchema.length) {
+    return (
+      <div className="field">
+        {pluginSchema.map((option) => {
+          if (!option || !option.key) return null;
+          if (option.type === 'switch') {
+            return (
+              <label className="checkbox-row" key={option.key}>
+                <Checkbox
+                  checked={options[option.key] === true}
+                  onChange={(event, data) => onOption(option.key, data.checked === true)}
+                />
+                <span>{option.label}</span>
+              </label>
+            );
+          }
+          return (
+            <div key={option.key}>
+              <label>{option.label}</label>
+              <Input
+                type={option.type === 'number' ? 'number' : 'text'}
+                value={String(options[option.key] ?? '')}
+                onChange={(event) => onOption(option.key, event.target.value)}
+              />
+            </div>
+          );
+        })}
+      </div>
+    );
+  }
   if (component.type === 'schedule') {
     return (
       <label className="checkbox-row">

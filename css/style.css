@@ -409,6 +409,18 @@ body.position-switching .miniCountdown {
     font-size: var(--center-font-size);
 }
 
+/* 插件组件容器：基础外观与自定义文本一致，具体内容由插件自行渲染 */
+.pluginComponent {
+    color: var(--col-text);
+    font-family: var(--font-base);
+    font-size: var(--sub-font-size);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 0;
+    overflow: hidden;
+}
+
 .leftSidebar {
     left: auto;
     color: var(--col-left);

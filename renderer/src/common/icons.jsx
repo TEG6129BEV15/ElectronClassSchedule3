@@ -53,4 +53,6 @@ export const ICONS = {
   // 主题包页面
   palette: '<path d="M12 3a9 9 0 0 0 0 18c.9 0 1.5-.7 1.5-1.5 0-.5-.2-.9-.5-1.2-.3-.3-.5-.7-.5-1.1 0-.9.7-1.6 1.6-1.6h1.4c2.2 0 3.8-1.7 3.8-3.9C19.3 6.3 16 3 12 3z"/><circle cx="7.5" cy="11.5" r="1.1" fill="currentColor" stroke="none"/><circle cx="9.5" cy="7.5" r="1.1" fill="currentColor" stroke="none"/><circle cx="13.5" cy="7" r="1.1" fill="currentColor" stroke="none"/><circle cx="16.5" cy="10" r="1.1" fill="currentColor" stroke="none"/>',
   folder: '<path d="M3 6.5c0-.8.7-1.5 1.5-1.5h4.2l1.8 1.8H19.5c.8 0 1.5.7 1.5 1.5v8.7c0 .8-.7 1.5-1.5 1.5H4.5C3.7 18.5 3 17.8 3 17z"/>',
+  plugin: '<path d="M10 3v2.6M10 14.4V17M3 10h2.6M14.4 10H17"/><rect x="5.6" y="5.6" width="8.8" height="8.8" rx="2"/>',
+  back: '<path d="M14.5 5 8 11.5l6.5 6.5"/>',
 };

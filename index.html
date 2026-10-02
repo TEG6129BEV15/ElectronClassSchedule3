@@ -90,10 +90,69 @@
     let legacyIndex = 0;
     const rows = configured.map(row => Array.isArray(row) ? row.map(component => {
       if (typeof component === 'string') return { id: `${component}-${++legacyIndex}`, type: component, options: {} };
-      return component && ['schedule', 'week', 'date', 'countdown', 'time', 'weather', 'customText'].includes(component.type)
+      return component && (['schedule', 'week', 'date', 'countdown', 'time', 'weather', 'customText'].includes(component.type) || isPluginComponentType(component.type))
         ? { id: component.id || `${component.type}-${++legacyIndex}`, type: component.type, options: component.options || {} } : null;
     }).filter(Boolean) : []).filter(row => row.length);
     return rows.length ? rows : [[{ id: 'schedule-1', type: 'schedule', options: {} }]];
+  }
+
+  // ===== 插件宿主 =====
+  // 插件 renderer.js 通过 window.pluginHost.registerComponent(type, { render, update }) 注册新组件；
+  // 主界面把组件渲染为 .pluginComponent 容器，并调用插件自己的渲染函数。
+  const pluginComponents = {};
+  const pluginTickCallbacks = [];
+  window.pluginHost = {
+    registerComponent(type, definition) {
+      if (typeof type !== 'string' || !type.trim() || !definition || typeof definition.render !== 'function') return;
+      pluginComponents[type.trim()] = definition;
+      // 已渲染过的界面（热启用插件时）重建布局，让新组件立刻出现
+      if (componentRows.children.length) {
+        try { renderComponentLayout(); } catch (error) { console.error('[plugin] 组件注册后重建布局失败:', error); }
+      }
+    },
+    onTick(callback) {
+      if (typeof callback === 'function') pluginTickCallbacks.push(callback);
+    },
+    getScheduleData: () => scheduleData,
+    getSettings: () => settings,
+    ipcRenderer,
+  };
+
+  function isPluginComponentType(type) {
+    return Object.prototype.hasOwnProperty.call(pluginComponents, type);
+  }
+
+  function runPluginComponentHooks(mode) {
+    const instances = getComponentLayout().flat().filter((component) => isPluginComponentType(component.type));
+    instances.forEach((component) => {
+      const element = document.querySelector(`[data-component-id="${component.id}"]`);
+      const definition = pluginComponents[component.type];
+      if (!element || !definition) return;
+      try {
+        const hook = mode === 'render' ? definition.render : definition.update;
+        if (typeof hook === 'function') hook(element, component.options || {}, window.pluginHost);
+      } catch (error) {
+        console.error(`[plugin] 组件 ${component.type} ${mode} 失败:`, error);
+      }
+    });
+  }
+
+  // 按启用列表顺序注入插件渲染脚本（脚本内注册组件后再渲染布局）
+  function loadEnabledPlugins() {
+    return ipcRenderer.invoke('get-enabled-plugins').then((plugins) => {
+      const list = Array.isArray(plugins) ? plugins : [];
+      return list.reduce((chain, plugin) => chain.then(() => {
+        if (!plugin || !plugin.renderer) return null;
+        return new Promise((resolve) => {
+          const script = document.createElement('script');
+          script.src = plugin.renderer;
+          script.setAttribute('data-plugin', plugin.id);
+          script.onload = () => resolve(null);
+          script.onerror = () => { console.error('[plugin] 渲染脚本加载失败:', plugin.id); resolve(null); };
+          document.head.appendChild(script);
+        });
+      }), Promise.resolve());
+    }).catch((error) => { console.error('[plugin] 获取插件列表失败:', error); });
   }
 
   function renderComponentLayout() {
@@ -120,6 +179,7 @@
           if (component.type === 'time') return `<div class="timeSidebar sidebar background" data-component-slot="time" data-component-id="${component.id}"><span class="currentTime t">00:00:00</span></div>`;
           if (component.type === 'weather') return `<div class="weatherSidebar sidebar background" data-component-slot="weather" data-component-id="${component.id}"><span class="weatherLine t"><span class="weatherEmoji">🌡️</span><span class="weatherTemp">--°</span></span><div class="corner weatherCity">天气</div></div>`;
           if (component.type === 'customText') return `<div class="customText background" data-component-slot="customText" data-component-id="${component.id}"></div>`;
+          if (isPluginComponentType(component.type)) return `<div class="pluginComponent background" data-component-slot="plugin" data-component-id="${component.id}" data-plugin-type="${component.type}"></div>`;
           return `<div class="rightSidebar sidebar background" data-component-slot="countdown" data-component-id="${component.id}"><span class="countdownDays t">000</span><div class="corner">天</div><div class="dateProgress"><i></i></div></div>`;
         }).join('')}
       </div>
@@ -139,6 +199,8 @@
     });
     rightSidebar = document.querySelector('[data-component-slot="countdown"]');
     leftSidebar = document.querySelector('[data-component-slot="week"]');
+    // 布局重建后请插件渲染自己的组件
+    runPluginComponentHooks('render');
   }
 
   function setScheduleClass() {
@@ -210,6 +272,9 @@
     if (showInlineCountdown && scheduleData.currentHighlight.isBreak && scheduleData.currentHighlight.index === scheduleData.scheduleArray.length) {
       classHtml += `<div class="class breakClassExpanded stateTransition" id="highlighted"><span class="expandedClassName"></span><span class="inlineCountdown">${scheduleData.currentHighlight.countdownText}</span><span class="inlineProgress"><i></i></span></div>`;
     }
+    // 时间点晚于全部时间段的分割线：显示在最后一节课之后
+    if (scheduleData.divider.indexOf(scheduleData.scheduleArray.length) != -1)
+      classHtml += '<div class="divider"></div>'
     document.querySelectorAll('.scheduleComponent .classContainer').forEach((element) => {
       element.innerHTML = classHtml;
       const expandedClassName = element.querySelector('.expandedClassName');
@@ -567,6 +632,8 @@
         }
       }
     });
+    // 插件组件的内容刷新（由组件自己决定是否重绘）
+    runPluginComponentHooks('update');
   }
 
   function tick(reset = false) {
@@ -583,6 +650,10 @@
       setBackgroundDisplay()
     }
     updateCountdownProgress()
+    // 插件组件的动态刷新（每次 tick 一次，插件自行控制内部节流）
+    pluginTickCallbacks.forEach((callback) => {
+      try { callback(scheduleData); } catch (error) { console.error('[plugin] tick 回调失败:', error); }
+    })
     lastScheduleData = $.extend(true, {}, scheduleData)
     checkReminders(scheduleData)
   }
@@ -593,6 +664,19 @@
     for (const key in settings.css_style) {
       root.style.setProperty(key, settings.css_style[key])
     }
+  }
+
+  // ===== 自定义样式 =====
+  // settings.custom_css 为任意 CSS 文本，以 <style id="customCss"> 注入到 head 末尾，
+  // 优先级高于 css/style.css 与主题包，相当于可对默认样式做完全重构。
+  function applyCustomCss() {
+    let el = document.getElementById('customCss');
+    if (!el) {
+      el = document.createElement('style');
+      el.id = 'customCss';
+      document.head.appendChild(el);
+    }
+    el.textContent = String(settings?.custom_css || '');
   }
 
   // ===== 主题切换 =====
@@ -621,16 +705,20 @@
   }
 
   let lastTickTime = new Date().getTime()
-  loadScheduleConfig().then(() => {
+  // 先读取配置，再按启用列表加载插件渲染脚本，最后渲染布局（保证插件组件首次渲染即生效）
+  loadScheduleConfig().then(() => loadEnabledPlugins()).then(() => {
     renderComponentLayout()
     applyScheduleCss()
+    applyCustomCss()
     applyTheme()
     applyPositionMode()
     scheduleData = getScheduleData();
     tick(true)
     refreshWeather()
   }).catch(() => {
+    renderComponentLayout()
     applyScheduleCss()
+    applyCustomCss()
     applyTheme()
     applyPositionMode()
     tick(true)
@@ -1082,6 +1170,7 @@
 
   ipcRenderer.on('settings-reloaded', () => {
     applyScheduleCss()
+    applyCustomCss()
     applyTheme()
     tick(true)
   })

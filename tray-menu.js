@@ -22,6 +22,9 @@ function render(items) {
         iconBox.className = 'icon';
         if (item.svg === 'restart') {
             iconBox.innerHTML = RESTART_SVG;
+        } else if (item.svgText) {
+            // 插件自带的内联 SVG 图标
+            iconBox.innerHTML = item.svgText;
         } else if (item.icon) {
             const img = document.createElement('img');
             img.src = item.icon;

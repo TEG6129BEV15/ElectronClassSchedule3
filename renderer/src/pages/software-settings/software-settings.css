@@ -439,6 +439,176 @@ input.native-color {
   color: var(--colorNeutralForeground3);
 }
 
+/* ===== 插件页 ===== */
+.plugin-version {
+  margin-left: 8px;
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--colorNeutralForeground3);
+}
+
+.plugin-card-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.plugin-enter {
+  color: var(--colorNeutralForeground3);
+  font-size: 18px;
+  line-height: 1;
+}
+
+.plugin-detail-bar {
+  margin-bottom: 8px;
+}
+
+.plugin-settings-panel {
+  margin-top: 16px;
+}
+
+.plugin-settings-mount {
+  min-height: 24px;
+}
+
+.plugin-settings-mount .field {
+  margin-bottom: 12px;
+}
+
+.plugin-settings-mount input[type="range"] {
+  display: block;
+  width: 100%;
+  max-width: 420px;
+  margin: 4px 0 12px;
+  accent-color: var(--colorCompoundBrandStroke);
+}
+
+.plugin-settings-mount input[type="color"] {
+  width: 46px;
+  height: 32px;
+  padding: 2px;
+  border: 1px solid var(--colorNeutralStroke1);
+  border-radius: 6px;
+  background: var(--colorNeutralBackground1);
+  cursor: pointer;
+}
+
+.plugin-settings-mount label b {
+  color: var(--colorNeutralForeground1);
+}
+
+.plugin-settings-mount textarea {
+  width: 100%;
+  min-height: 120px;
+  resize: vertical;
+  padding: 10px 12px;
+  border: 1px solid var(--colorNeutralStroke1);
+  border-radius: 6px;
+  background: var(--colorNeutralBackground1);
+  color: var(--colorNeutralForeground1);
+  font: 13px/1.5 Consolas, "Microsoft YaHei", monospace;
+}
+
+.plugin-settings-mount input[type="text"],
+.plugin-settings-mount input[type="number"] {
+  height: 32px;
+  padding: 0 10px;
+  border: 1px solid var(--colorNeutralStroke1);
+  border-radius: 6px;
+  background: var(--colorNeutralBackground1);
+  color: var(--colorNeutralForeground1);
+}
+
+.plugin-settings-mount button {
+  height: 32px;
+  padding: 0 14px;
+  border: 1px solid var(--colorNeutralStroke1);
+  border-radius: 6px;
+  background: var(--colorNeutralBackground2);
+  color: var(--colorNeutralForeground1);
+  cursor: pointer;
+}
+
+.plugin-settings-mount button:hover {
+  background: var(--colorNeutralBackground2Hover);
+}
+
+.plugin-settings-mount button.primary {
+  border-color: var(--colorCompoundBrandStroke);
+  background: var(--colorBrandBackground);
+  color: var(--colorNeutralForegroundOnBrand);
+}
+
+.plugin-settings-mount .row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+  flex-wrap: wrap;
+}
+
+.plugin-settings-mount .hint {
+  margin-top: 8px;
+  font-size: 12.5px;
+  color: var(--colorNeutralForeground3);
+}
+
+.plugin-settings-mount .list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.plugin-settings-mount .list-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border: 1px solid var(--colorNeutralStroke2);
+  border-radius: 6px;
+  background: var(--colorNeutralBackground2);
+  font-size: 13px;
+}
+
+/* ===== 主题页：自定义样式 ===== */
+.custom-css-panel {
+  margin-top: 16px;
+}
+
+.custom-css-help code {
+  display: inline-block;
+  margin: 0 2px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--colorNeutralBackground3);
+  font: 12px/1.5 Consolas, "Microsoft YaHei", monospace;
+  color: var(--colorNeutralForeground1);
+}
+
+.custom-css-reference {
+  margin-top: 10px;
+  font-size: 13px;
+  color: var(--colorNeutralForeground2);
+}
+
+.custom-css-reference summary {
+  cursor: pointer;
+  user-select: none;
+}
+
+.custom-css-reference-code {
+  margin: 10px 0 0;
+  max-height: 360px;
+  overflow: auto;
+  padding: 12px 14px;
+  border: 1px solid var(--colorNeutralStroke2);
+  border-radius: 6px;
+  background: var(--colorNeutralBackground3);
+  font: 12px/1.55 Consolas, "Microsoft YaHei", monospace;
+  white-space: pre;
+}
+
 /* ===== 提醒页：总开关 / 二级菜单子页 / 禁用态 ===== */
 .reminder-master-row {
   display: flex;

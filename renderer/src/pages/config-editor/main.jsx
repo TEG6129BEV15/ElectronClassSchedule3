@@ -9,13 +9,15 @@ import { Svg, ICONS } from '../../common/icons.jsx';
 import SubjectPage from './SubjectPage.jsx';
 import TimetablePage from './TimetablePage.jsx';
 import DailyPage from './DailyPage.jsx';
-import DividerPage from './DividerPage.jsx';
 import {
   collectTimetableCards,
   createCardId,
   getInvalidCardIndexes,
   getTimetableSlotCount,
+  mergeImportedTimetable,
+  migrateLegacyDividers,
   parseTimetableEntry,
+  sortCardsByTime,
 } from './config-utils.js';
 import { csesToConfig, configToCses } from './cses.js';
 import '../../common/tokens.css';
@@ -26,7 +28,6 @@ const NAV_ITEMS = [
   { page: 'subject', label: '科目名称', icon: ICONS.subject },
   { page: 'timetable', label: '时间表', icon: ICONS.timetable },
   { page: 'daily', label: '课表', icon: ICONS.daily },
-  { page: 'divider', label: '分割线', icon: ICONS.divider },
 ];
 
 function ConfigEditorApp() {
@@ -40,7 +41,6 @@ function ConfigEditorApp() {
   const [activeTimetableName, setActiveTimetableName] = useState(null);
   const [ttCards, setTtCards] = useState([]);
   const [activeDayIndex, setActiveDayIndex] = useState(0);
-  const [dividerTexts, setDividerTexts] = useState({});
   const [invalidIndexes, setInvalidIndexes] = useState(() => new Set());
   // 时间表“新增/重命名”页内弹窗：{ mode: 'add' | 'rename', oldName, value, error }
   const [nameModal, setNameModal] = useState(null);
@@ -69,10 +69,14 @@ function ConfigEditorApp() {
     ? Object.entries(config.subject_name)
     : [];
 
-  const cardsFromGroup = (group) => Object.entries(group || {})
-    .map(([range, value]) => ({ id: createCardId(), ...parseTimetableEntry(range, value) }));
+  // 从配置读入的卡片同样按开始时间排序，保证打开即为时间顺序
+  const cardsFromGroup = (group) => sortCardsByTime(Object.entries(group || {})
+    .map(([range, value]) => ({ id: createCardId(), ...parseTimetableEntry(range, value) })));
 
+  // 读取/导入配置时统一迁移：旧版顶层 divider 数字数组写入 timetable 单点时间，
+  // 迁移后删除顶层 divider（幂等，覆盖刷新、从 js 导入、从 CSES 导入三条入口）
   const initFromConfig = useCallback((data) => {
+    migrateLegacyDividers(data);
     configRef.current = data;
     const rows = data && data.subject_name && typeof data.subject_name === 'object'
       ? Object.entries(data.subject_name).map(([key, value]) => ({ key, value }))
@@ -83,7 +87,6 @@ function ConfigEditorApp() {
     setActiveTimetableName(firstName);
     setTtCards(firstName ? cardsFromGroup(data.timetable[firstName]) : []);
     setActiveDayIndex(0);
-    setDividerTexts({});
     setInvalidIndexes(new Set());
     bump();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -198,23 +201,11 @@ function ConfigEditorApp() {
     });
     configRef.current.timetable = renamedTimetables;
 
-    if (configRef.current.divider
-      && Object.prototype.hasOwnProperty.call(configRef.current.divider, oldName)) {
-      configRef.current.divider[trimmedName] = configRef.current.divider[oldName];
-      delete configRef.current.divider[oldName];
-    }
     if (Array.isArray(configRef.current.daily_class)) {
       configRef.current.daily_class.forEach((day) => {
         if (day && day.timetable === oldName) day.timetable = trimmedName;
       });
     }
-    setDividerTexts((prev) => {
-      if (!Object.prototype.hasOwnProperty.call(prev, oldName)) return prev;
-      const next = { ...prev };
-      next[trimmedName] = next[oldName];
-      delete next[oldName];
-      return next;
-    });
     setActiveTimetableName(trimmedName);
     setTtCards(cardsFromGroup(renamedTimetables[trimmedName]));
     setInvalidIndexes(new Set());
@@ -322,6 +313,30 @@ function ConfigEditorApp() {
     });
   };
 
+  // 从表格（Excel / CSV）或图片（Windows OCR）导入：解析结果合并进草稿，
+  // 用户核对无误后再点击“保存到 scheduleConfig.js”生效
+  const importFromTableOrImage = () => {
+    ipcRenderer.invoke('import-schedule-table').then((result) => {
+      if (!result) return;
+      if (result.error) {
+        alert(`导入失败：${result.error}`);
+        return;
+      }
+      const { kind, parsed } = result;
+      if (!parsed) return;
+      if (kind === 'image'
+        && !window.confirm(`已通过 OCR 识别图片，识别结果可能不准确。\n\n${parsed.summary}\n\n导入将替换当前编辑中的课表（未保存的内容会丢失），是否继续？`)) {
+        return;
+      }
+      const merged = mergeImportedTimetable(configRef.current, parsed);
+      initFromConfig(merged);
+      alert(`已导入：${parsed.summary}。\n请在“时间表 / 课表”页面核对后点击“保存到 scheduleConfig.js”生效。`);
+    }).catch((error) => {
+      console.error(error);
+      alert(`导入失败：${error.message || '读取文件失败'}`);
+    });
+  };
+
   const saveConfig = () => {
     if (!configRef.current) return;
     const result = commitActiveTimetable();
@@ -347,23 +362,8 @@ function ConfigEditorApp() {
         throw new Error('daily_class is empty');
       }
 
-      // 分割线：以 timetable 中的所有时间表为准逐个生成。
-      // 新增的时间表默认空数组；已删除时间表的陈旧 divider 配置随之清除，
-      // 避免配置文件中残留无效时间表的分割线。
-      const dividerResult = {};
-      const sourceDivider = configRef.current.divider || {};
-      const timetableNames = Object.keys(configRef.current.timetable || {});
-      timetableNames.forEach((name) => {
-        const raw = Object.prototype.hasOwnProperty.call(dividerTexts, name)
-          ? dividerTexts[name]
-          : (sourceDivider[name] || []).join(', ');
-        dividerResult[name] = String(raw).split(',')
-          .map((part) => part.trim())
-          .filter(Boolean)
-          .map((num) => Number(num))
-          .filter((num) => !Number.isNaN(num));
-      });
-      nextConfig.divider = dividerResult;
+      // 分割线已写入各 timetable 的单点时间条目；旧版顶层 divider 不再落盘
+      delete nextConfig.divider;
 
       setSaveState('saving');
       ipcRenderer.invoke('save-config-file', nextConfig)
@@ -492,13 +492,6 @@ function ConfigEditorApp() {
                 onAddSlot={addSlotToDay}
               />
             </div>
-            <div className={`ce-page${activePage === 'divider' ? ' active' : ''}`}>
-              <DividerPage
-                config={config}
-                dividerTexts={dividerTexts}
-                onChangeText={(name, text) => setDividerTexts((prev) => ({ ...prev, [name]: text }))}
-              />
-            </div>
             </main>
           </div>
         </div>
@@ -528,6 +521,14 @@ function ConfigEditorApp() {
               >
                 <strong>从 CSES 导入</strong>
                 <span>导入 CSES 通用课表交换文件（YAML / JSON，ClassIsland、奶酪课程表等支持）。</span>
+              </button>
+              <button
+                type="button"
+                className="import-option"
+                onClick={() => { setImportModalOpen(false); importFromTableOrImage(); }}
+              >
+                <strong>从表格 / 图片导入</strong>
+                <span>支持 Excel（xlsx / xls）、CSV 表格，或课表截图（使用 Windows OCR 识别，图片结果可能有误需核对）。</span>
               </button>
             </div>
             <div className="ce-modal-actions">

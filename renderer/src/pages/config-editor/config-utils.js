@@ -17,8 +17,29 @@ export function timeToMinutes(text) {
   return hours * 60 + minutes;
 }
 
-// config.timetable 的 "HH:MM-HH:MM": value 条目 → 可编辑卡片
+// 分钟数 → "HH:MM"（钳制在一天之内）
+export function minutesToTimeText(totalMinutes) {
+  const clamped = Math.max(0, Math.min(Math.round(totalMinutes), 23 * 60 + 59));
+  const hours = Math.floor(clamped / 60);
+  const minutes = clamped % 60;
+  return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}`;
+}
+
+// 分割线在 timetable 中的存储形式：单点时间 key（"HH:MM"，不含 "-"），
+// value 仅为可读性标记。识别以 key 形状为准，避免与课间字符串冲突。
+export const DIVIDER_MARKER = 'divider';
+
+export function isDividerKey(key) {
+  const text = String(key ?? '').trim();
+  return !text.includes('-') && /^\d{1,2}:\d{2}(?::\d{2})?$/.test(text);
+}
+
+// config.timetable 的条目 → 可编辑卡片
+// "HH:MM-HH:MM": number → 上课；string → 课间；"HH:MM" 单点 → 分割线
 export function parseTimetableEntry(range, value) {
+  if (isDividerKey(range)) {
+    return { type: 'divider', start: normalizeTimeText(range), end: '', name: '' };
+  }
   const parts = String(range ?? '').split('-');
   const start = normalizeTimeText(parts[0]);
   const end = normalizeTimeText(parts.slice(1).join('-'));
@@ -39,7 +60,8 @@ export function getTimetableSlotCount(timetable) {
   return Object.values(timetable).filter((value) => typeof value === 'number').length;
 }
 
-// 卡片数组 → config.timetable 的某个分组，并做与旧版一致的校验/自动编号
+// 卡片数组 → config.timetable 的某个分组，并做与旧版一致的校验/自动编号。
+// 上课/课间是 "HH:MM-HH:MM" 区间；分割线是 "HH:MM" 单点（值为 DIVIDER_MARKER）。
 export function collectTimetableCards(cards) {
   const group = {};
   const errors = [];
@@ -49,6 +71,21 @@ export function collectTimetableCards(cards) {
 
   cards.forEach((card, domIndex) => {
     const start = normalizeTimeText(card.start);
+
+    if (card.type === 'divider') {
+      if (!start) {
+        errors.push(`第 ${domIndex + 1} 个分割线的时间无效，请选择时间。`);
+        return;
+      }
+      if (seenKeys.has(start)) {
+        errors.push(`存在重复的分割线时间 ${start}，请调整后再保存。`);
+        return;
+      }
+      seenKeys.add(start);
+      orderedEntries.push({ key: start, type: 'divider' });
+      return;
+    }
+
     const end = normalizeTimeText(card.end);
     let valid = Boolean(start && end);
     if (valid && timeToMinutes(start) >= timeToMinutes(end)) valid = false;
@@ -76,7 +113,9 @@ export function collectTimetableCards(cards) {
     .forEach((entry, index) => { entry.classIndex = index; });
 
   orderedEntries.forEach((entry) => {
-    group[entry.key] = entry.type === 'class' ? entry.classIndex : entry.name;
+    if (entry.type === 'class') group[entry.key] = entry.classIndex;
+    else if (entry.type === 'divider') group[entry.key] = DIVIDER_MARKER;
+    else group[entry.key] = entry.name;
   });
 
   return { group, errors, invalidIndexes: errors.map((_, i) => i) };
@@ -88,6 +127,11 @@ export function getInvalidCardIndexes(cards) {
   const seenKeys = new Set();
   cards.forEach((card, domIndex) => {
     const start = normalizeTimeText(card.start);
+    if (card.type === 'divider') {
+      if (!start || seenKeys.has(start)) invalid.add(domIndex);
+      if (start) seenKeys.add(start);
+      return;
+    }
     const end = normalizeTimeText(card.end);
     let valid = Boolean(start && end);
     if (valid && timeToMinutes(start) >= timeToMinutes(end)) valid = false;
@@ -112,4 +156,105 @@ export function normalizeDayClassList(classList) {
     normalized.pop();
   }
   return normalized.length ? normalized : [''];
+}
+
+// 时间段列表按时间自动排序（分割线为单点时间，同样参与排序）。
+// 时间无效的卡片排在最后；同一时间点上分割线排在区间之前
+// （与主界面“落在上课区间 → 显示在该节课之前”的语义一致）；
+// 其余保持原有相对顺序（稳定排序）。
+export function sortCardsByTime(cards) {
+  return cards
+    .map((card, index) => ({ card, index, minutes: timeToMinutes(card.start) }))
+    .sort((a, b) => {
+      const av = a.minutes >= 0 ? a.minutes : Number.MAX_SAFE_INTEGER;
+      const bv = b.minutes >= 0 ? b.minutes : Number.MAX_SAFE_INTEGER;
+      if (av !== bv) return av - bv;
+      const at = a.card.type === 'divider' ? 0 : 1;
+      const bt = b.card.type === 'divider' ? 0 : 1;
+      if (at !== bt) return at - bt;
+      return a.index - b.index;
+    })
+    .map((entry) => entry.card);
+}
+
+// 表格/图片导入结果（schedule-import.js 的 parsed）合并进编辑器草稿：
+// - grid 模式（识别到星期表头）：替换每日课表与星期映射；
+// - single 模式：追加一个新课表分组与课表，不改动星期映射（可在“课表”页分配）。
+// 返回新对象，不修改原 config。
+export function mergeImportedTimetable(config, parsed) {
+  const next = JSON.parse(JSON.stringify(config || {}));
+  if (!next.timetable || typeof next.timetable !== 'object') next.timetable = {};
+  let name = String(parsed?.timetableName || '').trim() || '导入课表';
+  if (Object.prototype.hasOwnProperty.call(next.timetable, name)) {
+    const base = name;
+    let suffix = 2;
+    name = `${base}（导入）`;
+    while (Object.prototype.hasOwnProperty.call(next.timetable, name)) {
+      name = `${base}（导入 ${suffix}）`;
+      suffix += 1;
+    }
+  }
+  next.timetable[name] = parsed?.group && typeof parsed.group === 'object' ? parsed.group : {};
+
+  // 科目表补全（已有映射不覆盖）
+  if (!next.subject_name || typeof next.subject_name !== 'object') next.subject_name = {};
+  (Array.isArray(parsed?.subjects) ? parsed.subjects : []).forEach((subject) => {
+    if (subject && !Object.prototype.hasOwnProperty.call(next.subject_name, subject)) {
+      next.subject_name[subject] = subject;
+    }
+  });
+
+  const days = (Array.isArray(parsed?.days) ? parsed.days : []).map((day) => ({
+    Chinese: String(day?.name || '导入').trim() || '导入',
+    English: String(day?.en || '').trim(),
+    classList: Array.isArray(day?.classList) && day.classList.length ? day.classList : [''],
+    timetable: name,
+  }));
+  if (parsed?.mode === 'grid' && days.length) {
+    next.daily_class = days;
+    next.daily_schedule = Array.isArray(parsed.dailySchedule) && parsed.dailySchedule.length === 7
+      ? parsed.dailySchedule.map((index) => (Number.isInteger(index) ? index : 0))
+      : [0, 0, 0, 0, 0, 0, 0];
+  } else if (days.length) {
+    next.daily_class = Array.isArray(next.daily_class) ? next.daily_class : [];
+    next.daily_class = [...next.daily_class, days[0]];
+  }
+  return next;
+}
+
+// 旧版分割线迁移：顶层 divider: { 时间表名: [数字...] }（0 基课程序号）
+// → 写入对应时间表的单点时间条目，时间取该序号课程（按开始时间排序）的下课时间。
+// 迁移幂等；完成后删除顶层 divider。超出课程数范围的序号忽略。
+export function migrateLegacyDividers(config) {
+  if (!config || typeof config !== 'object') return config;
+  const legacy = config.divider;
+  if (config.timetable && typeof config.timetable === 'object') {
+    Object.entries(config.timetable).forEach(([name, group]) => {
+      if (!group || typeof group !== 'object') return;
+      const numbers = legacy && typeof legacy === 'object' && Array.isArray(legacy[name])
+        ? legacy[name]
+        : null;
+      if (!numbers || !numbers.length) return;
+      // 按开始时间排序的上课区间下课时间（0 基 → 数组下标）
+      const classEnds = Object.entries(group)
+        .filter(([key]) => !isDividerKey(key))
+        .filter(([, value]) => typeof value === 'number' || /^\d+$/.test(String(value)))
+        .map(([key]) => {
+          const end = normalizeTimeText(String(key).split('-').slice(1).join('-'));
+          return end ? timeToMinutes(end) : -1;
+        })
+        .filter((minutes) => minutes >= 0)
+        .sort((a, b) => a - b);
+      numbers.forEach((raw) => {
+        const index = Number(raw);
+        if (!Number.isInteger(index) || index < 0 || index >= classEnds.length) return;
+        const timeKey = minutesToTimeText(classEnds[index]);
+        if (!Object.prototype.hasOwnProperty.call(group, timeKey)) {
+          group[timeKey] = DIVIDER_MARKER;
+        }
+      });
+    });
+  }
+  delete config.divider;
+  return config;
 }

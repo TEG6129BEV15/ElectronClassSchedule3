@@ -8,6 +8,7 @@ import { ipcRenderer } from '../../common/electron.js';
 import { Svg, ICONS } from '../../common/icons.jsx';
 import ComponentsPage, { createComponentId, getConfiguredComponentRows } from './ComponentsPage.jsx';
 import ThemePacksPage from './ThemePacksPage.jsx';
+import PluginsPage from './PluginsPage.jsx';
 import '../../common/tokens.css';
 import '../../common/chrome.css';
 import './software-settings.css';
@@ -17,6 +18,7 @@ const NAV_ITEMS = [
   { page: 'components', label: '组件设置', icon: ICONS.components },
   { page: 'appearance', label: '外观', icon: ICONS.style },
   { page: 'themes', label: '主题', icon: ICONS.palette },
+  { page: 'plugins', label: '插件', icon: ICONS.plugin },
   { page: 'reminder', label: '提醒', icon: ICONS.reminder },
 ];
 
@@ -134,7 +136,15 @@ function SoftwareSettingsApp({ onThemeModeChange }) {
 
   const [, setTick] = useState(0);
   const bump = useCallback(() => setTick((tick) => tick + 1), []);
-  const [activePage, setActivePage] = useState('basic');
+  const [activePage, setActivePage] = useState(() => {
+    // 允许通过 URL 参数直接打开指定页面（插件浮窗的“设置”按钮 -> 插件页）
+    try {
+      const page = new URLSearchParams(window.location.search).get('page');
+      return NAV_ITEMS.some((item) => item.page === page) ? page : 'basic';
+    } catch (error) {
+      return 'basic';
+    }
+  });
   const [status, setStatus] = useState('');
   const [rows, setRows] = useState([]);
   const [selectedId, setSelectedId] = useState(null);
@@ -148,6 +158,8 @@ function SoftwareSettingsApp({ onThemeModeChange }) {
   const [reminderProviderTab, setReminderProviderTab] = useState('class');
   const [reminderAdvancedTab, setReminderAdvancedTab] = useState('sound');
   const [activeTheme, setActiveTheme] = useState('');
+  const [customCss, setCustomCss] = useState('');
+  const [pluginList, setPluginList] = useState([]);
   const [timeOffsetText, setTimeOffsetText] = useState('0');
   // 首帧与 URL 参数（主进程读磁盘注入）保持一致，避免挂载时 effect 先把 auto
   // 推给 Root 造成浅色闪帧；若之后 loadSettings 回包慢/失败，窗口就会残留浅色
@@ -176,12 +188,14 @@ function SoftwareSettingsApp({ onThemeModeChange }) {
     Promise.all([
       ipcRenderer.invoke('read-config-file'),
       ipcRenderer.invoke('read-settings-file'),
-    ]).then(([data, settingsData]) => {
+      ipcRenderer.invoke('list-plugins'),
+    ]).then(([data, settingsData, pluginData]) => {
       configRef.current = data;
       settingsRef.current = settingsData;
       settingsRef.current.component_layout = getConfiguredComponentRows(settingsData, data);
       setRows(settingsRef.current.component_layout);
       setSelectedId(null);
+      setPluginList(Array.isArray(pluginData?.plugins) ? pluginData.plugins : []);
       // 外观参数以“去掉 px 的草稿”形式放进输入框
       const drafts = {};
       CSS_VAR_SPECS.forEach((spec) => {
@@ -198,6 +212,7 @@ function SoftwareSettingsApp({ onThemeModeChange }) {
       setThemeMode(settingsData?.theme_mode || 'auto');
       setPositionMode(settingsData?.window_position || 'top');
       setActiveTheme(settingsData?.active_theme || '');
+      setCustomCss(typeof settingsData?.custom_css === 'string' ? settingsData.custom_css : '');
       setTimeOffsetText(String(Number(localStorage.getItem('timeOffset') || 0)));
       setStatus('');
       loadedRef.current = true;
@@ -211,6 +226,18 @@ function SoftwareSettingsApp({ onThemeModeChange }) {
   useEffect(() => {
     loadSettings();
   }, [loadSettings]);
+
+  // 主进程请求切换页面（如插件浮窗齿轮 -> 插件页）
+  useEffect(() => {
+    const onNavigate = (_event, page) => {
+      if (NAV_ITEMS.some((item) => item.page === page)) {
+        setActivePage(page);
+        setStatus('');
+      }
+    };
+    ipcRenderer.on('settings-navigate', onNavigate);
+    return () => ipcRenderer.removeListener('settings-navigate', onNavigate);
+  }, []);
 
   useEffect(() => {
     if (onThemeModeChange) onThemeModeChange(themeMode);
@@ -403,6 +430,37 @@ function SoftwareSettingsApp({ onThemeModeChange }) {
     }, themeId ? '主题已切换并立即生效' : '已恢复默认主题');
   };
 
+  // 自定义 CSS：编辑后防抖落盘（主窗口随 save-settings-file 自动 reload 生效）
+  const changeCustomCss = (cssText) => {
+    setCustomCss(cssText);
+    schedulePersist('custom_css', (nextSettings) => {
+      if (cssText) nextSettings.custom_css = cssText;
+      else delete nextSettings.custom_css;
+    }, cssText ? '自定义样式已保存并生效' : '已清空自定义样式', 800);
+  };
+
+  // 插件启用/停用：写入 settings.plugins_enabled，主进程随即启停插件并重载主界面
+  const refreshPlugins = useCallback(() => {
+    ipcRenderer.invoke('list-plugins').then((data) => {
+      setPluginList(Array.isArray(data?.plugins) ? data.plugins : []);
+    }).catch((error) => console.error('读取插件列表失败:', error));
+  }, []);
+
+  const togglePlugin = (plugin, enabled) => {
+    setPluginList((list) => list.map((item) => (
+      item.id === plugin.id ? { ...item, enabled } : item
+    )));
+    persistSettings((nextSettings) => {
+      if (!nextSettings.plugins_enabled || typeof nextSettings.plugins_enabled !== 'object') {
+        nextSettings.plugins_enabled = {};
+      }
+      if (enabled) nextSettings.plugins_enabled[plugin.id] = true;
+      else delete nextSettings.plugins_enabled[plugin.id];
+    }, enabled ? `插件“${plugin.name}”已启用并立即生效` : `插件“${plugin.name}”已停用`);
+    // 主进程写入设置后才真正启停插件：稍后回读列表，保证插件设置界面能连上插件通道
+    setTimeout(refreshPlugins, 600);
+  };
+
   return (
     <>
       <TitleBar title="软件设置" />
@@ -547,6 +605,9 @@ function SoftwareSettingsApp({ onThemeModeChange }) {
                 setSelectedId={setSelectedId}
                 settingsRef={settingsRef}
                 bump={bump}
+                pluginComponents={pluginList
+                  .filter((plugin) => plugin.enabled)
+                  .flatMap((plugin) => plugin.components || [])}
               />
             </section>
 
@@ -594,7 +655,20 @@ function SoftwareSettingsApp({ onThemeModeChange }) {
             </section>
 
             <section className={`ss-page${activePage === 'themes' ? ' active' : ''}`}>
-              <ThemePacksPage activeTheme={activeTheme} onSelectTheme={selectTheme} />
+              <ThemePacksPage
+                activeTheme={activeTheme}
+                onSelectTheme={selectTheme}
+                customCss={customCss}
+                onChangeCustomCss={changeCustomCss}
+              />
+            </section>
+
+            <section className={`ss-page${activePage === 'plugins' ? ' active' : ''}`}>
+              <PluginsPage
+                pluginList={pluginList}
+                onTogglePlugin={togglePlugin}
+                onStatus={setStatus}
+              />
             </section>
 
             <section className={`ss-page${activePage === 'reminder' ? ' active' : ''}`}>
