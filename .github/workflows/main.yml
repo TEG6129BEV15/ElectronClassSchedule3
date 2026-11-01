@@ -56,8 +56,8 @@ jobs:
 
       - name: Stage Win10/11 zip
         run: |
-          New-Item -ItemType Directory -Force dist | Out-Null
-          Move-Item -Force "./out/eSchedule-win32-x64/Win10_Win11_ElectronClassSchedule.zip" "dist/"
+          New-Item -ItemType Directory -Force artifacts | Out-Null
+          Move-Item -Force "./out/eSchedule-win32-x64/Win10_Win11_ElectronClassSchedule.zip" "artifacts/"
 
       - name: Install Electron 22 (Win7/8)
         run: npm install electron@22.3.27 --ignore-scripts
@@ -76,7 +76,7 @@ jobs:
           directory: './out/eSchedule-win32-x64'
 
       - name: Stage Win7/8 zip
-        run: Move-Item -Force "./out/eSchedule-win32-x64/Win7_Win8_ElectronClassSchedule.zip" "dist/"
+        run: Move-Item -Force "./out/eSchedule-win32-x64/Win7_Win8_ElectronClassSchedule.zip" "artifacts/"
 
       - name: Delete old release
         uses: cb80/delrel@latest
@@ -90,8 +90,8 @@ jobs:
           tag_name: latest
           name: Latest Release
           files: |
-            dist/Win10_Win11_ElectronClassSchedule.zip
-            dist/Win7_Win8_ElectronClassSchedule.zip
+            artifacts/Win10_Win11_ElectronClassSchedule.zip
+            artifacts/Win7_Win8_ElectronClassSchedule.zip
           body: |
             > 如需下载ECS2.0, 请于[Release: Build Result](https://github.com/aawwaaa/ElectronClassSchedule2/releases/tag/unmarked)下载
             - 点击下方 `ElectronClassSchedule.zip` 即可下载，下载完成后请先解压再运行
