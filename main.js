@@ -12,6 +12,14 @@ const Store = require('electron-store');
 const { DisableMinimize } = require('electron-disable-minimize');
 const store = new Store();
 
+// ===== 全局异常兜底：主进程未捕获异常/拒绝不应导致整个程序崩溃退出 =====
+process.on('uncaughtException', (error) => {
+    console.error('[main] uncaughtException:', error);
+});
+process.on('unhandledRejection', (reason) => {
+    console.error('[main] unhandledRejection:', reason);
+});
+
 // ===== Win11 Mica 云母材质（仅用于设置类窗口；Win10/21H2 无 Mica，回退 user32 亚克力） =====
 // mica-electron 在 require 时会追加 enable-transparent-visuals 命令行开关，必须在 app.ready 之前加载。
 let micaElectron = null;
@@ -215,9 +223,11 @@ const createWindow = () => {
             && point.y >= bounds.y - margin && point.y < bounds.y + bounds.height + margin
         const x = Math.round(point.x - bounds.x)
         const y = Math.round(point.y - bounds.y)
-        // 始终发送：移除 dx/dy 过滤，确保渲染进程在滑动过程中也能收到心跳
-        //（系统可能在滑动时节流坐标更新，缩短轮询间隔+持续发送能提高捕获率）
-        if (inside !== lastCursorState.inside || inside) {
+        // 仅在“进出窗口”或“窗口内坐标变化”时发送 IPC：
+        // 光标静止悬停时不再每 50ms 空发，减少主进程→渲染进程消息量。
+        const insideChanged = inside !== lastCursorState.inside
+        const posChanged = inside && (x !== lastCursorState.x || y !== lastCursorState.y)
+        if (insideChanged || posChanged) {
             lastCursorState = { inside, x, y }
             win.webContents.send('cursor-position', lastCursorState)
         }
@@ -225,8 +235,10 @@ const createWindow = () => {
     // 系统休眠唤醒、解锁屏幕后立即补一次刷新
     powerMonitor.on('resume', heartbeat)
     powerMonitor.on('unlock-screen', heartbeat)
+    // 主窗口用 floating 级置顶：高于普通窗口，但低于 screen-saver 级。
+    // 之前用 screen-saver 会压过 WPS 批注等创建的全屏覆盖层，导致 WPS 偶尔无法批注。
     if (store.get('isWindowAlwaysOnTop', true))
-        win.setAlwaysOnTop(true, 'screen-saver', 9999999999999)
+        win.setAlwaysOnTop(true, 'floating')
     guardRepaint(win)
 }
 // 构造快捷方式参数。
@@ -932,7 +944,7 @@ function promptSecurityPassword(reason, options) {
         const mainWin = (win && !win.isDestroyed()) ? win : null;
         const restoreTop = () => {
             if (mainWin && store.get('isWindowAlwaysOnTop', true)) {
-                mainWin.setAlwaysOnTop(true, 'screen-saver', 9999999999999);
+                mainWin.setAlwaysOnTop(true, 'floating');
             }
         };
         if (mainWin) mainWin.setAlwaysOnTop(false);
@@ -2002,7 +2014,7 @@ function closeTrayMenu() {
     }
     // 恢复主窗口置顶状态
     if (win && !win.isDestroyed() && store.get('isWindowAlwaysOnTop', true)) {
-        win.setAlwaysOnTop(true, 'screen-saver', 9999999999999);
+        win.setAlwaysOnTop(true, 'floating');
     }
 }
 
@@ -2044,7 +2056,7 @@ function executeTrayAction(id, unlocked = false) {
             const checked = !store.get('isWindowAlwaysOnTop', true);
             store.set('isWindowAlwaysOnTop', checked);
             if (checked)
-                win.setAlwaysOnTop(true, 'screen-saver', 9999999999999);
+                win.setAlwaysOnTop(true, 'floating');
             else
                 win.setAlwaysOnTop(false);
             return true;
@@ -2626,13 +2638,13 @@ ipcMain.on('reminder-fullscreen-close', hideFullscreenReminder);
 let reminderPinTimer = null;
 ipcMain.on('reminder-pin', (e, arg) => {
     if (!win || win.isDestroyed()) return;
-    win.setAlwaysOnTop(true, 'screen-saver', 9999999999999);
+    win.setAlwaysOnTop(true, 'floating');
     clearTimeout(reminderPinTimer);
     const duration = Number(arg && arg.duration);
     const ms = Number.isFinite(duration) && duration > 0 ? duration : 5000;
     reminderPinTimer = setTimeout(() => {
         if (win && !win.isDestroyed() && store.get('isWindowAlwaysOnTop', true)) {
-            win.setAlwaysOnTop(true, 'screen-saver', 9999999999999);
+            win.setAlwaysOnTop(true, 'floating');
         } else if (win && !win.isDestroyed()) {
             win.setAlwaysOnTop(false);
         }
