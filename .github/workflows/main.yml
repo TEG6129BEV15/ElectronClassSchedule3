@@ -28,9 +28,9 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          # node-gyp@10 + @electron/rebuild@3.7 支持 Node 20 与 VS2019/2022；
-          # node-gyp@13/@electron/rebuild@4 要求 Node >=22，仅在 VS2026+Node24 环境使用
-          node-version: '20'
+          # GitHub windows-latest 已升级到 VS 2026（v18），需 Node 24 + node-gyp@13 +
+          # @electron/rebuild@4 才能识别并编译原生模块。
+          node-version: '24'
 
       - name: Install dependencies
         # npm ci 保证按 lockfile 可复现安装；必须 --ignore-scripts：
