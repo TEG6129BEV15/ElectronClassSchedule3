@@ -6,6 +6,9 @@ on:
       - main
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: windows-latest
@@ -20,7 +23,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.12' 
+          python-version: '3.12'
 
       - name: Install setuptools
         run: pip install setuptools
@@ -41,30 +44,53 @@ jobs:
       - name: Rebuild dependencies
         run: node_modules/.bin/electron-rebuild
 
-      - name: Build application
+      - name: Build application (Win10/11)
         run: npm run build
 
-      - name: Delete release
+      - name: Pack Win10/11 zip
+        uses: thedoctor0/zip-release@0.7.5
+        with:
+          type: 'zip'
+          filename: 'Win10_Win11_ElectronClassSchedule.zip'
+          directory: './out/classSchedule-win32-x64'
+
+      - name: Install Electron 22 (Win7/8)
+        run: npm install electron@22.3.27 --ignore-scripts
+
+      - name: Rebuild dependencies for Electron 22
+        run: node_modules/.bin/electron-rebuild
+
+      - name: Build application (Win7/8)
+        run: npm run build
+
+      - name: Pack Win7/8 zip
+        uses: thedoctor0/zip-release@0.7.5
+        with:
+          type: 'zip'
+          filename: 'Win7_Win8_ElectronClassSchedule.zip'
+          directory: './out/classSchedule-win32-x64'
+
+      - name: Delete old release
         uses: cb80/delrel@latest
         with:
           tag: 'latest'
           token: ${{ secrets.GITHUB_TOKEN }}
-          
-      - name: Create release
-        id: create_release
-        uses: actions/create-release@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create release and upload assets
+        uses: softprops/action-gh-release@v2
         with:
           tag_name: latest
-          release_name: Latest Release 
+          name: Latest Release
+          files: |
+            ./out/classSchedule-win32-x64/Win10_Win11_ElectronClassSchedule.zip
+            ./out/classSchedule-win32-x64/Win7_Win8_ElectronClassSchedule.zip
           body: |
             > 如需下载ECS2.0, 请于[Release: Build Result](https://github.com/aawwaaa/ElectronClassSchedule2/releases/tag/unmarked)下载
             - 点击下方 `ElectronClassSchedule.zip` 即可下载，下载完成后请先解压再运行
             - 若下载过慢可使用第三方代理下载 [【点我下载】Win7_Win8_ElectronClassSchedule.zip](https://mirror.ghproxy.com/?q=https%3A%2F%2Fgithub.com%2FEnderWolf006%2FElectronClassSchedule%2Freleases%2Fdownload%2Flatest%2FWin7_Win8_ElectronClassSchedule.zip)
             - 若下载过慢可使用第三方代理下载 [【点我下载】Win10_Win11_ElectronClassSchedule.zip](https://mirror.ghproxy.com/?q=https%3A%2F%2Fgithub.com%2FEnderWolf006%2FElectronClassSchedule%2Freleases%2Fdownload%2Flatest%2FWin10_Win11_ElectronClassSchedule.zip)
             - 推荐使用VSCode编辑配置文件 [【点我下载】Visual Studio Code](https://lsw-fast.lenovo.com.cn/appstore/apps/4970-2024-03-01100059-1709258459745.exe)
-            - 欢迎进入官方群交流讨论 [【点我加群】电子课程表QQ交流二群: 914887202](https://qm.qq.com/cgi-bin/qm/qr?k=SL4_VQ9Zmpch-64RbYhkKbTZ5cNjIZ-N&jump_from=webapi&authKey=kxhiNZcQZwoSC/85e3dPxUsL+kpaLIBmxbrcfRLjSJeH35o0D0a/tHBVYI1as5p1)
+            - 欢迎进入官方群交流讨论 [【点我加群】电子课程表QQ交流二群: 914887202](https://qm.qq.com/cgi-bin/qm/qr?k=SL4_VQ9Zmpch-64RbYhKkBtTZ5cNjIZ-N&jump_from=webapi&authKey=kxhiNZcQZwoSC/85e3dPxUsL+kpaLIBmxbrcfRLjSJeH35o0D0a/tHBVYI1as5p1)
             - 更新日志(请备份好配置文件后整体替换包体):
             - - 2024/2/24: 已更新窗口置顶选项与上课时间倒计时隐藏
             - - 2024/3/09: 已支持课表样式修改，包括字体、透明度、间距等属性修改
@@ -79,47 +105,3 @@ jobs:
             - 喜欢本项目的话, 点击右上角的Star支持一下作者吧😘
           draft: false
           prerelease: false
-
-      - name: Pack folder to zip
-        uses: thedoctor0/zip-release@0.7.5
-        with:
-          type: 'zip'
-          filename: 'release.zip'
-          directory: './out/classSchedule-win32-x64'
-
-      - name: Upload release asset
-        id: upload-release-asset
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: ./out/classSchedule-win32-x64/release.zip
-          asset_name: Win10_Win11_ElectronClassSchedule.zip
-          asset_content_type: application/zip
-
-      - name: Install specific Electron version
-        run: npm install electron@22.3.27 --ignore-scripts
-
-      - name: Rebuild dependencies for specific Electron version
-        run: node_modules/.bin/electron-rebuild
-
-      - name: Build application with specific Electron version
-        run: npm run build
-
-      - name: Pack folder to zip for specific Electron version
-        uses: thedoctor0/zip-release@0.7.5
-        with:
-          type: 'zip'
-          filename: 'release-electron-22.3.27.zip'
-          directory: './out/classSchedule-win32-x64'
-
-      - name: Upload release asset for specific Electron version
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: ./out/classSchedule-win32-x64/release-electron-22.3.27.zip
-          asset_name: Win7_Win8_ElectronClassSchedule.zip
-          asset_content_type: application/zip
